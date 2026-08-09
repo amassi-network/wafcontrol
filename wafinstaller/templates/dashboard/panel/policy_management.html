@@ -33,6 +33,15 @@
               <span class="badge badge-primary mr-2">{{ policy_bundle.active_exclusions }} active exclusions</span>
               <span class="badge badge-secondary">{{ policy_bundle.active_address_entries }} active address entries</span>
             </div>
+            {% if expiring_exclusions or expiring_entries %}
+              <div class="alert alert-warning mt-3">
+                <strong>Policy objects expiring within seven days:</strong>
+                <ul class="mb-0">
+                  {% for exclusion in expiring_exclusions %}<li>Exclusion {{ exclusion.name }} — owner {{ exclusion.owner }} — {{ exclusion.expires_at }}</li>{% endfor %}
+                  {% for entry in expiring_entries %}<li>Address {{ entry.network }} ({{ entry.address_list.name }}) — {{ entry.expires_at }}</li>{% endfor %}
+                </ul>
+              </div>
+            {% endif %}
           </div>
         </div>
       </div>
@@ -117,7 +126,7 @@
     {% endfor %}
 
     <div class="iq-card">
-      <div class="iq-card-header"><h5 class="card-title">Create a minimal CRS exclusion</h5></div>
+      <div class="iq-card-header"><h5 class="card-title">{% if edit_exclusion %}Edit {{ edit_exclusion.name }}{% else %}Create a minimal CRS exclusion{% endif %}</h5></div>
       <div class="iq-card-body">
         <p class="text-muted">Prefer removing one variable from one rule. Scope the exception whenever possible. New exclusions remain drafts until explicitly approved.</p>
         {% if source_attack %}
@@ -127,7 +136,11 @@
             Review and narrow the generated scope before saving.
           </div>
         {% endif %}
-        <form method="post" action="{% url 'wafinstaller:rule_exclusion_create' %}">
+        {% if edit_exclusion %}
+          <form method="post" action="{% url 'wafinstaller:rule_exclusion_update' edit_exclusion.id %}">
+        {% else %}
+          <form method="post" action="{% url 'wafinstaller:rule_exclusion_create' %}">
+        {% endif %}
           {% csrf_token %}
           <div class="row">
             {% for field in exclusion_form %}
@@ -137,7 +150,7 @@
               </div>
             {% endfor %}
           </div>
-          <button type="submit" class="btn btn-primary">Create exclusion</button>
+          <button type="submit" class="btn btn-primary">{% if edit_exclusion %}Save as draft{% else %}Create exclusion{% endif %}</button>
         </form>
       </div>
     </div>
@@ -158,9 +171,13 @@
               <td>{% if exclusion.rule_id %}<code>ID {{ exclusion.rule_id }}</code>{% else %}<code>Tag {{ exclusion.rule_tag }}</code>{% endif %}{% if exclusion.target %} / <code>{{ exclusion.target }}</code>{% endif %}</td>
               <td>{{ exclusion.host|default:"all hosts" }} · {{ exclusion.method|default:"all methods" }} · {{ exclusion.path|default:"all paths" }}</td>
               <td><strong>{{ exclusion.owner }}</strong><br>{{ exclusion.rationale }}</td>
-              <td>{% if exclusion.impact_count == None %}Not available for tags{% else %}{{ exclusion.impact_count }} event{{ exclusion.impact_count|pluralize }}{% endif %}</td>
+              <td>{% if exclusion.impact_count == None %}Not available for tags{% else %}{{ exclusion.impact_count.total }} total / {{ exclusion.impact_count.suspicious }} suspicious{% endif %}</td>
               <td>{{ exclusion.expires_at|default:"No expiry" }}</td>
               <td class="d-flex">
+                <a href="?edit={{ exclusion.id }}" class="btn btn-sm btn-outline-secondary mr-2">Edit</a>
+                <form method="post" action="{% url 'wafinstaller:policy_object_mutation' 'rule-exclusion' exclusion.id 'clone' %}" class="mr-2">
+                  {% csrf_token %}<button type="submit" class="btn btn-sm btn-outline-secondary">Clone</button>
+                </form>
                 <form method="post" action="{% url 'wafinstaller:policy_object_mutation' 'rule-exclusion' exclusion.id 'approve' %}" class="mr-2">
                   {% csrf_token %}<button type="submit" class="btn btn-sm btn-outline-success">{% if exclusion.status == 'approved' %}Revoke{% else %}Approve{% endif %}</button>
                 </form>
@@ -183,11 +200,9 @@
     <div class="iq-card">
       <div class="iq-card-header d-flex justify-content-between align-items-center">
         <h5 class="card-title">Candidate policy and deployment diff</h5>
-        <form method="post" action="{% url 'wafinstaller:policy_deploy' %}">
+        <form method="post" action="{% url 'wafinstaller:policy_revision_create' %}">
           {% csrf_token %}
-          <button type="submit" class="btn btn-danger" {% if not include_status %}disabled aria-disabled="true"{% endif %}>
-            Validate and deploy
-          </button>
+          <button type="submit" class="btn btn-primary">Save immutable candidate</button>
         </form>
       </div>
       <div class="iq-card-body">
@@ -196,6 +211,37 @@
         <div class="row">
           <div class="col-lg-6"><h6>Before CRS</h6><pre class="bg-light p-3" style="max-height: 40vh; overflow:auto;">{{ policy_bundle.before }}</pre></div>
           <div class="col-lg-6"><h6>After CRS</h6><pre class="bg-light p-3" style="max-height: 40vh; overflow:auto;">{{ policy_bundle.after }}</pre></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="iq-card">
+      <div class="iq-card-header"><h5 class="card-title">Immutable policy revisions</h5></div>
+      <div class="iq-card-body">
+        {% if separate_approver %}<div class="alert alert-info">A separate user must approve each candidate.</div>{% endif %}
+        <div class="table-responsive">
+          <table class="table table-sm">
+            <thead><tr><th>Revision</th><th>Created</th><th>Status</th><th>Approved by</th><th>Actions</th></tr></thead>
+            <tbody>
+            {% for revision in revisions %}
+              <tr>
+                <td><code>{{ revision.checksum|slice:":12" }}</code></td>
+                <td>{{ revision.created_at }} by {{ revision.created_by|default:"system" }}</td>
+                <td><span class="badge badge-secondary">{{ revision.get_status_display }}</span>{% if revision.deployment_error %}<br><small class="text-danger">{{ revision.deployment_error }}</small>{% endif %}</td>
+                <td>{{ revision.approved_by|default:"-" }}</td>
+                <td class="d-flex">
+                  {% if revision.status == "candidate" %}
+                    <form method="post" action="{% url 'wafinstaller:policy_revision_mutation' revision.id 'approve' %}" class="mr-2">{% csrf_token %}<button class="btn btn-sm btn-outline-success">Approve</button></form>
+                  {% elif revision.status == "approved" %}
+                    <form method="post" action="{% url 'wafinstaller:policy_revision_mutation' revision.id 'deploy' %}">{% csrf_token %}<button class="btn btn-sm btn-danger" {% if not include_status %}disabled{% endif %}>Validate and deploy</button></form>
+                  {% endif %}
+                </td>
+              </tr>
+            {% empty %}
+              <tr><td colspan="5" class="text-muted">No frozen revision yet.</td></tr>
+            {% endfor %}
+            </tbody>
+          </table>
         </div>
       </div>
     </div>

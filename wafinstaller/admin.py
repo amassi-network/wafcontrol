@@ -1,6 +1,13 @@
 from django.contrib import admin
 
-from wafinstaller.models import AddressEntry, AddressList, AuditEntry, RuleExclusion
+from wafinstaller.models import (
+    AddressEntry,
+    AddressList,
+    AuditEntry,
+    PolicyRevision,
+    RuleExclusion,
+    TriageDecision,
+)
 
 
 @admin.register(AuditEntry)
@@ -75,3 +82,24 @@ class RuleExclusionAdmin(ReadOnlyPolicyAdmin):
     )
     list_filter = ("kind", "status", "enabled")
     search_fields = ("name", "rule_id", "rule_tag", "host", "path", "rationale")
+
+
+@admin.register(TriageDecision)
+class TriageDecisionAdmin(ReadOnlyPolicyAdmin):
+    list_display = ("attack", "classification", "decided_by", "updated_at")
+    list_filter = ("classification", "updated_at")
+    search_fields = ("attack__ip", "attack__rule_id", "notes")
+
+
+@admin.register(PolicyRevision)
+class PolicyRevisionAdmin(ReadOnlyPolicyAdmin):
+    list_display = (
+        "checksum",
+        "status",
+        "created_by",
+        "approved_by",
+        "created_at",
+        "deployed_at",
+    )
+    list_filter = ("status", "created_at")
+    search_fields = ("checksum",)

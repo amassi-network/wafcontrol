@@ -2,7 +2,7 @@ from typing import ClassVar
 
 from django import forms
 
-from wafinstaller.models import AddressEntry, AddressList, RuleExclusion
+from wafinstaller.models import AddressEntry, AddressList, RuleExclusion, TriageDecision
 
 
 class StyledModelForm(forms.ModelForm):
@@ -64,4 +64,15 @@ class RuleExclusionForm(StyledModelForm):
         widgets: ClassVar[dict] = {
             "rationale": forms.Textarea(attrs={"rows": 2}),
             "expires_at": forms.DateTimeInput(attrs={"type": "datetime-local"}),
+        }
+
+
+class TriageDecisionForm(StyledModelForm):
+    class Meta:
+        model = TriageDecision
+        fields = ("classification", "notes")
+        widgets: ClassVar[dict] = {
+            "notes": forms.Textarea(
+                attrs={"rows": 2, "placeholder": "Reasoning, evidence or follow-up"}
+            )
         }

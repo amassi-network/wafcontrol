@@ -6,7 +6,10 @@ from wafinstaller.policy_views import (
     PolicyDeployView,
     PolicyManagementView,
     PolicyObjectMutationView,
+    PolicyRevisionCreateView,
+    PolicyRevisionMutationView,
     RuleExclusionCreateView,
+    RuleExclusionUpdateView,
 )
 from wafinstaller.views import (
     AddCustomRuleView,
@@ -24,6 +27,7 @@ from wafinstaller.views import (
     DashboardView,
     DeleteCustomRuleView,
     EditCustomRuleView,
+    EventTriageView,
     ForceFetchCrsVersionsView,
     HomeRedirectView,
     LoginsView,
@@ -54,6 +58,11 @@ urlpatterns = [
     path("dashboard/install-waf/", install_waf_page, name="install_waf_page"),
     # Attacks
     path("dashboard/attacks/", WafAttacksView.as_view(), name="waf_attacks"),
+    path(
+        "dashboard/attacks/<int:attack_id>/triage/",
+        EventTriageView.as_view(),
+        name="event_triage",
+    ),
     path(
         "dashboard/critical/", CriticalWafAttacksView.as_view(), name="critical_attacks"
     ),
@@ -141,12 +150,27 @@ urlpatterns = [
         name="rule_exclusion_create",
     ),
     path(
-        "dashboard/policies/<str:object_type>/<int:object_id>/<str:operation>/",
-        PolicyObjectMutationView.as_view(),
-        name="policy_object_mutation",
+        "dashboard/policies/exclusions/<int:object_id>/update/",
+        RuleExclusionUpdateView.as_view(),
+        name="rule_exclusion_update",
+    ),
+    path(
+        "dashboard/policies/revisions/create/",
+        PolicyRevisionCreateView.as_view(),
+        name="policy_revision_create",
+    ),
+    path(
+        "dashboard/policies/revisions/<int:revision_id>/<str:operation>/",
+        PolicyRevisionMutationView.as_view(),
+        name="policy_revision_mutation",
     ),
     path(
         "dashboard/policies/deploy/", PolicyDeployView.as_view(), name="policy_deploy"
+    ),
+    path(
+        "dashboard/policies/<str:object_type>/<int:object_id>/<str:operation>/",
+        PolicyObjectMutationView.as_view(),
+        name="policy_object_mutation",
     ),
     # App config + Admin profile
     path("dashboard/settings/", AppSettingsView.as_view(), name="app_settings"),

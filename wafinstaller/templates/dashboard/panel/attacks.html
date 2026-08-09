@@ -74,6 +74,12 @@
                                             {% if request.GET.status == 'Detected' %}selected{% endif %}>Detected
                                     </option>
                                 </select>
+                                <select name="classification" class="form-control mr-2">
+                                    <option value="">All triage states</option>
+                                    {% for value, label in triage_choices %}
+                                      <option value="{{ value }}" {% if request.GET.classification == value %}selected{% endif %}>{{ label }}</option>
+                                    {% endfor %}
+                                </select>
                                 <button type="submit" class="btn btn-primary">Filter</button>
                             </form>
 
@@ -159,6 +165,25 @@
                                                                     <div class="mb-0"><strong>Message:</strong>
                                                                         <pre><code>{{ attack.message }}</code></pre>
                                                                     </div>
+                                                                    <hr>
+                                                                    <div><strong>Method:</strong> {{ attack.method|default:"-" }}</div>
+                                                                    <div><strong>Transaction:</strong> <code>{{ attack.transaction_id|default:"-" }}</code></div>
+                                                                    <div><strong>Matched variable:</strong> <code>{{ attack.matched_variable|default:"-" }}</code></div>
+                                                                    <div><strong>Tags:</strong> {{ attack.rule_tags|join:", "|default:"-" }}</div>
+                                                                    <hr>
+                                                                    <form method="post" action="{% url 'wafinstaller:event_triage' attack.id %}">
+                                                                      {% csrf_token %}
+                                                                      <div class="form-group">
+                                                                        <label for="classification-{{ attack.id }}">Classification</label>
+                                                                        <select id="classification-{{ attack.id }}" name="classification" class="form-control" required>
+                                                                          {% for value, label in triage_choices %}
+                                                                            <option value="{{ value }}" {% if attack.triage.classification == value %}selected{% endif %}>{{ label }}</option>
+                                                                          {% endfor %}
+                                                                        </select>
+                                                                      </div>
+                                                                      <textarea name="notes" class="form-control mb-2" rows="2" maxlength="1000" placeholder="Reasoning or follow-up">{{ attack.triage.notes }}</textarea>
+                                                                      <button type="submit" class="btn btn-success">Save triage</button>
+                                                                    </form>
                                                                 </div>
                                                                 <div class="modal-footer">
                                                                     <a class="btn btn-primary"

@@ -1,29 +1,42 @@
-import os
 import json
-import time
 import logging
+import os
 import subprocess
-from datetime import datetime, timedelta, timezone as pytimezone
+import time
+from datetime import datetime, timedelta
+from datetime import timezone as pytimezone
+from pathlib import Path
 from typing import Dict, List, Tuple
 
 import requests
 from celery import shared_task
-from django.db import IntegrityError
 from django.conf import settings
+from django.db import IntegrityError
 from django.utils import timezone  # <-- use Django timezone
-from pathlib import Path
 
-from .attacks.attack_nginx import determine_status
-from .models import Attack, CrsVersion, DashboardStat
-from wafinstaller.helper.utils import get_country_info
 from wafinstaller.helper.crs import load_app_settings
-from wafinstaller.helper.tasks_helpers import detect_server_kind  # ensure filename matches!
-from .attacks import attack_apache as ap_mod, attack_nginx as ngx_mod
+from wafinstaller.helper.tasks_helpers import (
+    detect_server_kind,
+)  # ensure filename matches!
+from wafinstaller.helper.utils import get_country_info
+
+from .attacks import attack_apache as ap_mod
+from .attacks import attack_nginx as ngx_mod
+from .attacks.attack_nginx import determine_status
+from .models import (
+    AddressEntry,
+    Attack,
+    AuditEntry,
+    CrsVersion,
+    DashboardStat,
+    RuleExclusion,
+)
 
 logger = logging.getLogger(__name__)
 
 
 # ---------- Script path helpers ----------
+
 
 def _scripts_dir() -> Path:
 
@@ -35,6 +48,7 @@ def _scripts_dir() -> Path:
 
 
 # ---------- Streaming runner (for long-running installers) ----------
+
 
 @shared_task(bind=True)
 def run_waf_install(self):
@@ -63,6 +77,7 @@ def run_waf_install(self):
 
 
 # ---------- System stats ----------
+
 
 @shared_task
 def update_dashboard_stats():
@@ -96,15 +111,28 @@ def update_dashboard_stats():
 
 # ---------- Core updater shared by Apache/Nginx ----------
 
+
 def _update_waf_attacks_core(mod, backend: str) -> str:
     if backend == "apache":
-        AUDIT_CANDIDATES = ["/var/log/apache2/modsec_audit.log", "/var/log/modsec_audit.log"]
-        ERROR_CANDIDATES = ["/var/log/apache2/error.log", "/var/log/apache2/wafcontrol_error.log"]
-        ACCESS_CANDIDATES = ["/var/log/apache2/access.log", "/var/log/apache2/other_vhosts_access.log"]
+        AUDIT_CANDIDATES = [
+            "/var/log/apache2/modsec_audit.log",
+            "/var/log/modsec_audit.log",
+        ]
+        ERROR_CANDIDATES = [
+            "/var/log/apache2/error.log",
+            "/var/log/apache2/wafcontrol_error.log",
+        ]
+        ACCESS_CANDIDATES = [
+            "/var/log/apache2/access.log",
+            "/var/log/apache2/other_vhosts_access.log",
+        ]
         LOCK_FILE = "/tmp/update_waf_attacks_apache.lock"
         STATE_DIR = "/var/lib/wafparser/apache"
     else:
-        AUDIT_CANDIDATES = ["/var/log/nginx/modsec_audit.log", "/var/log/modsec_audit.log"]
+        AUDIT_CANDIDATES = [
+            "/var/log/nginx/modsec_audit.log",
+            "/var/log/modsec_audit.log",
+        ]
         ERROR_CANDIDATES = ["/var/log/nginx/error.log"]
         ACCESS_CANDIDATES = ["/var/log/nginx/access.log"]
         LOCK_FILE = "/tmp/update_waf_attacks_nginx.lock"
@@ -150,7 +178,9 @@ def _update_waf_attacks_core(mod, backend: str) -> str:
     try:
         blocks = []
         if AUDIT_LOG:
-            blocks = mod.read_audit_blocks_serial_without_z(AUDIT_LOG, max_bytes=8000000)
+            blocks = mod.read_audit_blocks_serial_without_z(
+                AUDIT_LOG, max_bytes=8000000
+            )
 
         if not blocks and AUDIT_LOG:
             blocks = mod.parse_audit_blocks_incremental(
@@ -189,21 +219,32 @@ def _update_waf_attacks_core(mod, backend: str) -> str:
             if not mod.is_ip(ip):
                 continue
 
-            uri = mod.uri_from_B_sections(sections) or mod.extract_first(mod.URI_RE, blk) or ""
+            uri = (
+                mod.uri_from_B_sections(sections)
+                or mod.extract_first(mod.URI_RE, blk)
+                or ""
+            )
             if not uri or mod.looks_static(uri):
                 continue
 
             ver = mod.extract_first(mod.VER_RE, blk)
             ref = mod.extract_first(mod.REFERER_RE, blk)
             tags = mod.extract_all(mod.TAGS_RE, blk)
+            method = mod.method_from_B_sections(sections)
+            matched_variable = mod.extract_first(mod.MATCHED_VAR_RE, blk)
+            transaction_id = uid or uid_a or ""
             blocked = mod.blocked_from_block_text(blk)
 
-            severity = mod.extract_severity_from_log(blk, mod.extract_first(mod.RID_RE, blk) or "")
+            severity = mod.extract_severity_from_log(
+                blk, mod.extract_first(mod.RID_RE, blk) or ""
+            )
             anomaly_score = mod.extract_anomaly_score(blk)
 
             status = determine_status(severity, anomaly_score, blocked)
 
-            raw_hits = mod.extract_hits_from_sections(sections) or mod.parse_rule_hits(blk)
+            raw_hits = mod.extract_hits_from_sections(sections) or mod.parse_rule_hits(
+                blk
+            )
             hits = mod.filter_rule_hits(raw_hits)
             if not hits:
                 continue
@@ -216,13 +257,26 @@ def _update_waf_attacks_core(mod, backend: str) -> str:
                     full_uri = cand
 
             for rid, msg in hits:
-                sig = mod.build_sig(ip or "", f"{host}|{full_uri}" or "", rid or "", msg or "", ver or "", status)
+                sig = mod.build_sig(
+                    ip or "",
+                    f"{host}|{full_uri}" or "",
+                    rid or "",
+                    msg or "",
+                    ver or "",
+                    status,
+                )
                 if sig in inrun_seen:
                     continue
                 inrun_seen.add(sig)
 
                 if Attack.objects.filter(
-                        ip=ip, uri=full_uri, host=host or None, rule_id=rid, message=msg, version=ver, status=status
+                    ip=ip,
+                    uri=full_uri,
+                    host=host or None,
+                    rule_id=rid,
+                    message=msg,
+                    version=ver,
+                    status=status,
                 ).exists():
                     continue
 
@@ -245,6 +299,10 @@ def _update_waf_attacks_core(mod, backend: str) -> str:
                         anomaly_score=anomaly_score,
                         version=ver or "-",
                         host=host or None,
+                        method=method,
+                        transaction_id=transaction_id,
+                        matched_variable=matched_variable,
+                        rule_tags=sorted(set(tags)),
                     )
                     created += 1
                 except IntegrityError:
@@ -261,7 +319,9 @@ def _update_waf_attacks_core(mod, backend: str) -> str:
         except Exception:
             pass
 
+
 # ---------- Per-backend public tasks ----------
+
 
 @shared_task
 def update_waf_attacks_apache():
@@ -277,7 +337,75 @@ def update_waf_attacks_nginx():
     return _update_waf_attacks_core(ngx_mod, backend="nginx")
 
 
+@shared_task
+def expire_managed_policy_objects():
+    """Disable expired policy objects while retaining their audit history."""
+    moment = timezone.now()
+    expired_entries = list(
+        AddressEntry.objects.filter(enabled=True, expires_at__lte=moment)
+    )
+    expired_exclusions = list(
+        RuleExclusion.objects.filter(enabled=True, expires_at__lte=moment)
+    )
+    entry_count = AddressEntry.objects.filter(
+        pk__in=[entry.pk for entry in expired_entries]
+    ).update(enabled=False)
+    exclusion_count = RuleExclusion.objects.filter(
+        pk__in=[item.pk for item in expired_exclusions]
+    ).update(enabled=False)
+    deployment = "not-required"
+    if entry_count or exclusion_count:
+        from wafinstaller.helper.adapters import get_paths
+        from wafinstaller.policy import (
+            PolicyDeploymentError,
+            deploy_policy_bundle,
+            include_status,
+            render_policy,
+        )
+
+        if include_status():
+            paths = get_paths()
+            try:
+                changed = deploy_policy_bundle(
+                    render_policy(),
+                    test_cmd=paths.test_cmd,
+                    reload_cmd=paths.reload_cmd,
+                )
+                deployment = "reloaded" if changed else "already-active"
+            except PolicyDeploymentError:
+                AddressEntry.objects.filter(
+                    pk__in=[entry.pk for entry in expired_entries]
+                ).update(enabled=True)
+                RuleExclusion.objects.filter(
+                    pk__in=[item.pk for item in expired_exclusions]
+                ).update(enabled=True)
+                AuditEntry.objects.create(
+                    action="policy.expiry.run",
+                    target="managed-policy",
+                    outcome=AuditEntry.Outcome.FAILED,
+                    details={
+                        "address_entries": entry_count,
+                        "rule_exclusions": exclusion_count,
+                        "deployment": "rolled-back",
+                    },
+                )
+                raise
+
+    AuditEntry.objects.create(
+        action="policy.expiry.run",
+        target="managed-policy",
+        outcome=AuditEntry.Outcome.SUCCEEDED,
+        details={
+            "address_entries": entry_count,
+            "rule_exclusions": exclusion_count,
+            "deployment": deployment,
+        },
+    )
+    return {"address_entries": entry_count, "rule_exclusions": exclusion_count}
+
+
 # ---------- Housekeeping ----------
+
 
 @shared_task
 def delete_old_attacks():
@@ -289,6 +417,7 @@ def delete_old_attacks():
 
 
 # ---------- CRS version install (stream logs) ----------
+
 
 @shared_task(bind=True)
 def run_crs_version_install(self, version: str):
@@ -316,6 +445,7 @@ def run_crs_version_install(self, version: str):
 
 # ---------- Fetch CRS versions from GitHub ----------
 
+
 @shared_task
 def fetch_crs_versions_task():
     try:
@@ -328,7 +458,11 @@ def fetch_crs_versions_task():
             url = f"https://api.github.com/repos/coreruleset/coreruleset/releases?per_page=20&page={page}"
             resp = requests.get(url, timeout=15, headers=headers)
             if resp.status_code != 200:
-                logger.error("GitHub responded with status %s: %s", resp.status_code, resp.text[:200])
+                logger.error(
+                    "GitHub responded with status %s: %s",
+                    resp.status_code,
+                    resp.text[:200],
+                )
                 break
             releases = resp.json() or []
             for r in releases:
@@ -340,7 +474,9 @@ def fetch_crs_versions_task():
                 if not tag or not published_at:
                     continue
                 # Parse to aware datetime (UTC)
-                dt = datetime.strptime(published_at, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=pytimezone.utc)
+                dt = datetime.strptime(published_at, "%Y-%m-%dT%H:%M:%SZ").replace(
+                    tzinfo=pytimezone.utc
+                )
                 version, _ = CrsVersion.objects.update_or_create(
                     tag=tag,
                     defaults={"published_at": dt, "zip_url": zip_url},

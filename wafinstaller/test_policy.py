@@ -1,20 +1,24 @@
 import subprocess
+from hashlib import sha256
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import call, patch
 
 from django.contrib.auth import get_user_model
 from django.core.exceptions import ValidationError
-from django.test import Client, SimpleTestCase, TestCase
+from django.test import Client, SimpleTestCase, TestCase, override_settings
 from django.urls import reverse
 from django.utils import timezone
 
+from wafinstaller.attacks import attack_apache, attack_nginx
 from wafinstaller.models import (
     AddressEntry,
     AddressList,
     Attack,
     AuditEntry,
+    PolicyRevision,
     RuleExclusion,
+    TriageDecision,
 )
 from wafinstaller.policy import (
     AFTER_FILENAME,
@@ -24,6 +28,7 @@ from wafinstaller.policy import (
     deploy_policy_bundle,
     render_policy,
 )
+from wafinstaller.tasks import expire_managed_policy_objects
 
 
 class ManagedPolicyModelTests(TestCase):
@@ -420,3 +425,141 @@ class ManagedPolicyInstallerTests(SimpleTestCase):
 
         self.assertEqual(result.returncode, 2)
         self.assertIn("safe absolute path", result.stdout)
+
+
+class PolicyLot3BTests(TestCase):
+    def setUp(self):
+        self.author = get_user_model().objects.create_user(
+            username="author", password="password", is_staff=True
+        )
+        self.approver = get_user_model().objects.create_user(
+            username="approver-3b", password="password", is_staff=True
+        )
+
+    def _attack(self):
+        return Attack.objects.create(
+            country="France",
+            flag="fr",
+            rule_id="942100",
+            message="Matched Data",
+            uri="/api/contact",
+            status="Blocked",
+            version="4.28.0",
+            method="POST",
+            transaction_id="tx-123",
+            matched_variable="ARGS:description",
+            rule_tags=["attack-sqli"],
+        )
+
+    def test_event_triage_is_created_and_audited(self):
+        attack = self._attack()
+        self.client.force_login(self.author)
+        response = self.client.post(
+            reverse("wafinstaller:event_triage", args=(attack.pk,)),
+            {
+                "classification": TriageDecision.Classification.FALSE_POSITIVE,
+                "notes": "Reproduced with valid business input.",
+            },
+        )
+        self.assertRedirects(response, reverse("wafinstaller:waf_attacks"))
+        decision = TriageDecision.objects.get(attack=attack)
+        self.assertEqual(decision.decided_by, self.author)
+        self.assertTrue(AuditEntry.objects.filter(action="event.triage").exists())
+
+    def test_policy_revision_content_is_immutable(self):
+        revision = PolicyRevision.objects.create(
+            checksum=sha256(b"before\0after").hexdigest(),
+            before_content="before",
+            after_content="after",
+            created_by=self.author,
+        )
+        revision.before_content = "changed"
+        with self.assertRaises(ValidationError):
+            revision.save()
+
+    @override_settings(WAFCONTROL_REQUIRE_SEPARATE_APPROVER=True)
+    def test_revision_requires_a_different_approver(self):
+        revision = PolicyRevision.objects.create(
+            checksum=sha256(b"before\0after").hexdigest(),
+            before_content="before",
+            after_content="after",
+            created_by=self.author,
+        )
+        self.client.force_login(self.author)
+        self.client.post(
+            reverse(
+                "wafinstaller:policy_revision_mutation",
+                args=(revision.pk, "approve"),
+            )
+        )
+        revision.refresh_from_db()
+        self.assertEqual(revision.status, PolicyRevision.Status.CANDIDATE)
+
+        self.client.force_login(self.approver)
+        self.client.post(
+            reverse(
+                "wafinstaller:policy_revision_mutation",
+                args=(revision.pk, "approve"),
+            )
+        )
+        revision.refresh_from_db()
+        self.assertEqual(revision.status, PolicyRevision.Status.APPROVED)
+        self.assertEqual(revision.approved_by, self.approver)
+
+    def test_expiry_task_disables_objects_and_records_audit(self):
+        address_list = AddressList.objects.create(
+            name="temporary-scanners",
+            purpose=AddressList.Purpose.OBSERVE,
+            description="Temporary observation",
+        )
+        entry = AddressEntry.objects.create(
+            address_list=address_list,
+            network="192.0.2.1/32",
+            comment="Expired",
+            expires_at=timezone.now() - timezone.timedelta(minutes=1),
+        )
+        exclusion = RuleExclusion.objects.create(
+            name="temporary-exclusion",
+            kind=RuleExclusion.Kind.REMOVE_RULE,
+            rule_id=920350,
+            rationale="Temporary",
+            owner="security",
+            status=RuleExclusion.Status.APPROVED,
+            expires_at=timezone.now() - timezone.timedelta(minutes=1),
+        )
+
+        result = expire_managed_policy_objects()
+
+        entry.refresh_from_db()
+        exclusion.refresh_from_db()
+        self.assertFalse(entry.enabled)
+        self.assertFalse(exclusion.enabled)
+        self.assertEqual(result, {"address_entries": 1, "rule_exclusions": 1})
+        self.assertTrue(AuditEntry.objects.filter(action="policy.expiry.run").exists())
+
+
+class ModSecurityEventRegressionTests(SimpleTestCase):
+    def test_extracts_method_transaction_tags_and_precise_variable(self):
+        raw = """---tx-123-B--
+POST /api/contact HTTP/1.1
+Host: ironitia.com
+---tx-123-H--
+ModSecurity: Warning. Matched Data: select found within ARGS:description [id "942100"] [tag "attack-sqli"] [unique_id "tx-123"]
+"""
+        sections_by_backend = (
+            attack_nginx.split_sections_lenient(raw),
+            attack_apache.split_sections_lenient(raw),
+        )
+        for backend, sections in zip(
+            (attack_nginx, attack_apache), sections_by_backend, strict=True
+        ):
+            with self.subTest(backend=backend.__name__):
+                self.assertEqual(backend.method_from_B_sections(sections), "POST")
+                self.assertEqual(
+                    backend.extract_first(backend.MATCHED_VAR_RE, raw),
+                    "ARGS:description",
+                )
+                self.assertEqual(
+                    backend.extract_all(backend.TAGS_RE, raw), ["attack-sqli"]
+                )
+                self.assertEqual(backend.extract_first(backend.UID_RE, raw), "tx-123")

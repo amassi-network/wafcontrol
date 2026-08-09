@@ -19,7 +19,7 @@ from django.contrib.auth.views import LoginView
 from django.contrib.auth.views import LogoutView as DjangoLogoutView
 from django.db.models import Count, Q
 from django.http import JsonResponse
-from django.shortcuts import redirect, render
+from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse
 from django.utils.decorators import method_decorator
 from django.utils.translation import gettext_lazy as _
@@ -65,7 +65,8 @@ from wafinstaller.security import (
 )
 
 from .forms import AdminLogin, AdminPasswordForm, AdminProfileForm
-from .models import Attack, CrsVersion, DashboardStat, UserProfile
+from .models import Attack, CrsVersion, DashboardStat, TriageDecision, UserProfile
+from .policy_forms import TriageDecisionForm
 from .tasks import fetch_crs_versions_task, run_waf_install
 
 User = get_user_model()
@@ -74,9 +75,7 @@ User = get_user_model()
 def _rule_file(filename, *, allowed_suffixes=(".conf", ".data")):
     version = get_crs_full_version()
     rule_dir = get_rules_dir(version)
-    return resolve_managed_file(
-        rule_dir, filename, allowed_suffixes=allowed_suffixes
-    )
+    return resolve_managed_file(rule_dir, filename, allowed_suffixes=allowed_suffixes)
 
 
 def _active_custom_rule_file(requested_version=None):
@@ -104,7 +103,7 @@ _ALLOWED_RULE_PHASES = {"1", "2", "3", "4", "5"}
 
 def _safe_rule_fragment(value, field, *, max_length=1024, allow_single_quote=False):
     value = (value or "").strip()
-    forbidden = "\r\n\x00\"" + ("" if allow_single_quote else "'")
+    forbidden = '\r\n\x00"' + ("" if allow_single_quote else "'")
     if not value or len(value) > max_length or any(char in value for char in forbidden):
         raise ManagedFileError(f"Invalid {field}.")
     return value
@@ -119,7 +118,9 @@ def _build_custom_rule(request):
     if phase not in _ALLOWED_RULE_PHASES or action not in _ALLOWED_RULE_ACTIONS:
         raise ManagedFileError("Invalid rule phase or action.")
 
-    variable = _safe_rule_fragment(request.POST.get("variable"), "rule variable", max_length=255)
+    variable = _safe_rule_fragment(
+        request.POST.get("variable"), "rule variable", max_length=255
+    )
     if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_:.&!\-]*", variable):
         raise ManagedFileError("Invalid rule variable.")
     operator = _safe_rule_fragment(
@@ -159,6 +160,7 @@ def _build_custom_rule(request):
 # -------------------------
 # Auth
 # -------------------------
+
 
 @method_decorator(csrf_protect, name="dispatch")
 @method_decorator(sensitive_post_parameters("password"), name="dispatch")
@@ -251,6 +253,7 @@ class HomeRedirectView(View):
 # WAF Install / status
 # -------------------------
 
+
 @login_required
 @require_POST
 @audit_mutation("waf.install")
@@ -270,10 +273,10 @@ def install_waf_page(request):
     return redirect("wafinstaller:dashboard")
 
 
-
 # -------------------------
 # Dashboard
 # -------------------------
+
 
 class DashboardView(AuditedMutationMixin, LoginRequiredMixin, TemplateView):
     audit_action = "crs.update"
@@ -308,9 +311,7 @@ class DashboardView(AuditedMutationMixin, LoginRequiredMixin, TemplateView):
                 "waf": waf_data,
                 "installed_crs": installed_crs,
                 "latest_crs": latest_crs,
-                "update_available": is_crs_update_available(
-                    installed_crs, latest_crs
-                ),
+                "update_available": is_crs_update_available(installed_crs, latest_crs),
                 "crs_version_status": crs_version_status,
                 "active_server": service_data.get("server", "none"),
             }
@@ -325,7 +326,9 @@ class DashboardView(AuditedMutationMixin, LoginRequiredMixin, TemplateView):
                 "ram_usage": latest_stats.ram_usage if latest_stats else "0",
                 "disk_usage": latest_stats.disk_usage if latest_stats else "0",
                 "storage_free": latest_stats.storage_free if latest_stats else "0",
-                "total_processes": latest_stats.total_processes if latest_stats else "0",
+                "total_processes": latest_stats.total_processes
+                if latest_stats
+                else "0",
                 "total_threads": latest_stats.total_threads if latest_stats else "0",
                 "total_handles": latest_stats.total_handles if latest_stats else "0",
             }
@@ -358,6 +361,7 @@ class DashboardView(AuditedMutationMixin, LoginRequiredMixin, TemplateView):
 # Attacks list / critical / top
 # -------------------------
 
+
 class WafAttacksView(LoginRequiredMixin, ListView):
     model = Attack
     template_name = "dashboard/panel/attacks.html"
@@ -366,13 +370,14 @@ class WafAttacksView(LoginRequiredMixin, ListView):
     login_url = "wafinstaller:login"
 
     def get_queryset(self):
-        qs = Attack.objects.all().order_by("-timestamp")
+        qs = Attack.objects.select_related("triage").all().order_by("-timestamp")
         ip = self.request.GET.get("ip")
         rule_id = self.request.GET.get("rule_id")
         status = self.request.GET.get("status")
         start_date = self.request.GET.get("start_date")
         end_date = self.request.GET.get("end_date")
         host = self.request.GET.get("host")
+        classification = self.request.GET.get("classification")
 
         if ip:
             qs = qs.filter(ip__icontains=ip)
@@ -386,6 +391,8 @@ class WafAttacksView(LoginRequiredMixin, ListView):
             qs = qs.filter(timestamp__date__lte=end_date)
         if host:
             qs = qs.filter(host__icontains=host)
+        if classification:
+            qs = qs.filter(triage__classification=classification)
 
         return qs
 
@@ -402,6 +409,8 @@ class WafAttacksView(LoginRequiredMixin, ListView):
         )
         context["repeated_attackers"] = repeated_ips
 
+        context["triage_choices"] = TriageDecision.Classification.choices
+        context["triage_form"] = TriageDecisionForm()
         for attack in context["attacks"]:
             if attack.severity >= 3:  # High / Critical
                 attack.row_class = "table-danger"
@@ -487,10 +496,12 @@ class CriticalWafAttacksView(LoginRequiredMixin, ListView):
         context["filtered_count"] = self.get_queryset().count()
         return context
 
-
         # -------------------------
+
+
 # CRS update (sync)
 # -------------------------
+
 
 class CrsUpdateSyncView(AuditedMutationMixin, LoginRequiredMixin, View):
     audit_action = "crs.update"
@@ -527,6 +538,7 @@ class GetTaskStatusView(LoginRequiredMixin, View):
 # -------------------------
 # CRS files/rules browsing
 # -------------------------
+
 
 class CRSRuleListView(LoginRequiredMixin, TemplateView):
     template_name = "dashboard/panel/crs_rules.html"
@@ -592,6 +604,7 @@ class SaveCRSRuleView(AuditedMutationMixin, LoginRequiredMixin, View):
                 status=500,
             )
 
+
 class CRSCategoriesView(LoginRequiredMixin, TemplateView):
     template_name = "dashboard/panel/crs_categories.html"
     login_url = "wafinstaller:login"
@@ -602,7 +615,9 @@ class CRSCategoriesView(LoginRequiredMixin, TemplateView):
         rule_dir = get_rules_dir(version)
         rule_files = []
         if rule_dir and os.path.isdir(rule_dir):
-            rule_files = [f for f in sorted(os.listdir(rule_dir)) if f.endswith(".conf")]
+            rule_files = [
+                f for f in sorted(os.listdir(rule_dir)) if f.endswith(".conf")
+            ]
         context.update({"crs_version": version, "rule_files": rule_files})
         return context
 
@@ -652,6 +667,7 @@ class CRSRuleListByFileView(LoginRequiredMixin, TemplateView):
 
         context.update({"rules": rules, "filename": filename, "crs_version": version})
         return context
+
 
 class ToggleCRSRuleView(AuditedMutationMixin, LoginRequiredMixin, View):
     audit_action = "crs.rule.toggle"
@@ -725,6 +741,7 @@ class ToggleCRSRuleView(AuditedMutationMixin, LoginRequiredMixin, View):
                 status=500,
             )
 
+
 class UpdateSingleCRSRuleView(AuditedMutationMixin, LoginRequiredMixin, View):
     audit_action = "crs.rule.update"
     login_url = "wafinstaller:login"
@@ -796,9 +813,11 @@ class UpdateSingleCRSRuleView(AuditedMutationMixin, LoginRequiredMixin, View):
                 status=500,
             )
 
+
 # -------------------------
 # Server network/traffic
 # -------------------------
+
 
 class ServerTrafficAnalysisView(LoginRequiredMixin, TemplateView):
     template_name = "dashboard/panel/server_traffic.html"
@@ -845,6 +864,7 @@ class ServerTrafficAnalysisView(LoginRequiredMixin, TemplateView):
 # -------------------------
 # CRS versions page / switch
 # -------------------------
+
 
 class CrsVersionListView(LoginRequiredMixin, View):
     login_url = "wafinstaller:login"
@@ -906,6 +926,7 @@ class CrsSwitchVersionView(AuditedMutationMixin, LoginRequiredMixin, View):
 # ModSecurity settings
 # -------------------------
 
+
 class ModSecuritySettingsView(AuditedMutationMixin, LoginRequiredMixin, View):
     audit_action = "modsecurity.settings.update"
     template_name = "dashboard/panel/waf_settings.html"
@@ -936,7 +957,11 @@ class ModSecuritySettingsView(AuditedMutationMixin, LoginRequiredMixin, View):
             values = {}
             for key in MODSEC_KEYS:
                 value = request.POST.get(key, "").strip()
-                if not value or len(value) > 1024 or any(c in value for c in "\r\n\x00"):
+                if (
+                    not value
+                    or len(value) > 1024
+                    or any(c in value for c in "\r\n\x00")
+                ):
                     raise ManagedFileError(f"Invalid value for {key}.")
                 values[key] = value
 
@@ -976,6 +1001,7 @@ class ModSecuritySettingsView(AuditedMutationMixin, LoginRequiredMixin, View):
 # -------------------------
 # AFTER-CRS custom rules
 # -------------------------
+
 
 class CustomRulesView(LoginRequiredMixin, View):
     login_url = "wafinstaller:login"
@@ -1060,7 +1086,9 @@ class AddCustomRuleView(AuditedMutationMixin, LoginRequiredMixin, View):
         except (OSError, UnicodeError):
             mark_audit_failure(request)
             messages.error(request, "Unable to add the custom rule.")
-        return redirect(reverse("wafinstaller:custom_rules") + f"?version={version or ''}")
+        return redirect(
+            reverse("wafinstaller:custom_rules") + f"?version={version or ''}"
+        )
 
 
 class EditCustomRuleView(AuditedMutationMixin, LoginRequiredMixin, View):
@@ -1098,7 +1126,9 @@ class EditCustomRuleView(AuditedMutationMixin, LoginRequiredMixin, View):
         except (OSError, UnicodeError):
             mark_audit_failure(request)
             messages.error(request, "Unable to update the custom rule.")
-        return redirect(reverse("wafinstaller:custom_rules") + f"?version={version or ''}")
+        return redirect(
+            reverse("wafinstaller:custom_rules") + f"?version={version or ''}"
+        )
 
 
 class DeleteCustomRuleView(AuditedMutationMixin, LoginRequiredMixin, View):
@@ -1127,12 +1157,15 @@ class DeleteCustomRuleView(AuditedMutationMixin, LoginRequiredMixin, View):
         except (OSError, UnicodeError):
             mark_audit_failure(request)
             messages.error(request, "Unable to delete the custom rule.")
-        return redirect(reverse("wafinstaller:custom_rules") + f"?version={version or ''}")
+        return redirect(
+            reverse("wafinstaller:custom_rules") + f"?version={version or ''}"
+        )
 
 
 # -------------------------
 # App settings (WafControl)
 # -------------------------
+
 
 class AppSettingsView(AuditedMutationMixin, LoginRequiredMixin, View):
     audit_action = "application.settings.update"
@@ -1168,6 +1201,7 @@ class AppSettingsView(AuditedMutationMixin, LoginRequiredMixin, View):
 # -------------------------
 # Admin profile (2FA)
 # -------------------------
+
 
 class AdminProfileView(AuditedMutationMixin, LoginRequiredMixin, View):
     audit_action = "admin.profile.update"
@@ -1270,6 +1304,7 @@ class AdminProfileView(AuditedMutationMixin, LoginRequiredMixin, View):
 # Force-fetch CRS versions
 # -------------------------
 
+
 class ForceFetchCrsVersionsView(AuditedMutationMixin, LoginRequiredMixin, View):
     audit_action = "crs.catalog.refresh"
     login_url = "wafinstaller:login"
@@ -1284,3 +1319,28 @@ class ForceFetchCrsVersionsView(AuditedMutationMixin, LoginRequiredMixin, View):
             mark_audit_failure(request)
             messages.error(request, "Unable to refresh the CRS release catalog.")
         return redirect("wafinstaller:crs_version")
+
+
+class EventTriageView(AuditedMutationMixin, LoginRequiredMixin, View):
+    login_url = "wafinstaller:login"
+    audit_action = "event.triage"
+
+    def post(self, request, attack_id):
+        attack = get_object_or_404(Attack, pk=attack_id)
+        current = TriageDecision.objects.filter(attack=attack).first()
+        form = TriageDecisionForm(request.POST, instance=current)
+        if form.is_valid():
+            decision = form.save(commit=False)
+            decision.attack = attack
+            decision.decided_by = request.user
+            decision.save()
+            messages.success(
+                request,
+                f"Event #{attack.pk} classified as {decision.get_classification_display()}.",
+            )
+        else:
+            mark_audit_failure(request)
+            for errors in form.errors.values():
+                for error in errors:
+                    messages.error(request, error)
+        return redirect("wafinstaller:waf_attacks")

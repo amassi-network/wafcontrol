@@ -1,17 +1,29 @@
+from datetime import timedelta
+from hashlib import sha256
 from typing import ClassVar
 from urllib.parse import urlsplit
 
+from django.conf import settings
 from django.contrib import messages
 from django.contrib.auth.mixins import LoginRequiredMixin
+from django.db import transaction
 from django.db.models import Q
 from django.shortcuts import get_object_or_404, redirect
+from django.utils import timezone
 from django.views import View
 from django.views.generic import TemplateView
 
 from wafinstaller.audit import AuditedMutationMixin, mark_audit_failure
 from wafinstaller.helper.adapters import get_paths
-from wafinstaller.models import AddressEntry, AddressList, Attack, RuleExclusion
+from wafinstaller.models import (
+    AddressEntry,
+    AddressList,
+    Attack,
+    PolicyRevision,
+    RuleExclusion,
+)
 from wafinstaller.policy import (
+    PolicyBundle,
     PolicyDeploymentError,
     deploy_policy_bundle,
     include_directives,
@@ -48,9 +60,13 @@ class PolicyManagementView(LoginRequiredMixin, TemplateView):
         host = (attack.host or "").split(":", 1)[0]
         initial = {
             "name": f"event-{attack.pk}-rule-{attack.rule_id}"[:120],
-            "kind": RuleExclusion.Kind.REMOVE_RULE,
+            "kind": RuleExclusion.Kind.REMOVE_TARGET
+            if attack.matched_variable
+            else RuleExclusion.Kind.REMOVE_RULE,
             "rule_id": rule_id,
+            "target": attack.matched_variable,
             "host": host,
+            "method": attack.method,
             "path": urlsplit(attack.uri).path or "/",
             "path_match": RuleExclusion.PathMatch.EXACT,
             "rationale": (
@@ -75,13 +91,26 @@ class PolicyManagementView(LoginRequiredMixin, TemplateView):
                 )
             else:
                 events = events.filter(uri__startswith=exclusion.path)
-        return events.count()
+        suspicious = events.filter(Q(status="Blocked") | Q(severity__gte=3)).count()
+        return {"total": events.count(), "suspicious": suspicious}
 
     def get_context_data(self, **kwargs):
         context = super().get_context_data(**kwargs)
         bundle = render_policy()
         initial, source_attack = self._exclusion_initial()
         exclusions = list(RuleExclusion.objects.all())
+        edit_id = self.request.GET.get("edit")
+        edit_exclusion = RuleExclusion.objects.filter(pk=edit_id).first()
+        if edit_exclusion:
+            initial = None
+        moment = timezone.now()
+        expiry_deadline = moment + timedelta(days=7)
+        expiring_exclusions = RuleExclusion.objects.filter(
+            enabled=True, expires_at__gt=moment, expires_at__lte=expiry_deadline
+        )
+        expiring_entries = AddressEntry.objects.filter(
+            enabled=True, expires_at__gt=moment, expires_at__lte=expiry_deadline
+        )
         for exclusion in exclusions:
             exclusion.impact_count = self._impact_count(exclusion)
         context.update(
@@ -90,12 +119,22 @@ class PolicyManagementView(LoginRequiredMixin, TemplateView):
                 "exclusions": exclusions,
                 "address_list_form": AddressListForm(),
                 "address_entry_form": AddressEntryForm(),
-                "exclusion_form": RuleExclusionForm(initial=initial),
+                "exclusion_form": RuleExclusionForm(
+                    instance=edit_exclusion, initial=initial
+                ),
                 "source_attack": source_attack,
                 "policy_bundle": bundle,
                 "policy_diff": policy_diff(bundle),
                 "include_status": include_status(),
                 "include_directives": include_directives(),
+                "edit_exclusion": edit_exclusion,
+                "revisions": PolicyRevision.objects.select_related(
+                    "created_by", "approved_by"
+                )[:20],
+                "separate_approver": settings.WAFCONTROL_REQUIRE_SEPARATE_APPROVER,
+                "now": moment,
+                "expiring_exclusions": expiring_exclusions,
+                "expiring_entries": expiring_entries,
             }
         )
         return context
@@ -163,7 +202,7 @@ class PolicyObjectMutationView(AuditedMutationMixin, LoginRequiredMixin, View):
 
     def post(self, request, object_type, object_id, operation):
         model = self.models.get(object_type)
-        if model is None or operation not in {"toggle", "approve", "delete"}:
+        if model is None or operation not in {"toggle", "approve", "delete", "clone"}:
             mark_audit_failure(request)
             messages.error(request, "Unsupported policy operation.")
             return redirect("wafinstaller:policy_management")
@@ -173,13 +212,43 @@ class PolicyObjectMutationView(AuditedMutationMixin, LoginRequiredMixin, View):
             label = str(instance)
             instance.delete()
             messages.success(request, f"{label} deleted.")
+        elif operation == "clone" and isinstance(instance, RuleExclusion):
+            source_id = instance.pk
+            instance.pk = None
+            instance.name = f"{instance.name}-copy-{source_id}"
+            instance.status = RuleExclusion.Status.DRAFT
+            instance.created_by = request.user
+            instance.approved_by = None
+            instance.approved_at = None
+            instance.save()
+            messages.success(request, f"Draft {instance.name} cloned.")
         elif operation == "approve" and isinstance(instance, RuleExclusion):
             instance.status = (
                 RuleExclusion.Status.DRAFT
                 if instance.status == RuleExclusion.Status.APPROVED
                 else RuleExclusion.Status.APPROVED
             )
-            instance.save(update_fields=("status", "updated_at"))
+            if (
+                instance.status == RuleExclusion.Status.APPROVED
+                and settings.WAFCONTROL_REQUIRE_SEPARATE_APPROVER
+                and instance.created_by_id == request.user.id
+            ):
+                mark_audit_failure(request)
+                messages.error(request, "A different user must approve this exclusion.")
+                return redirect("wafinstaller:policy_management")
+            instance.approved_by = (
+                request.user
+                if instance.status == RuleExclusion.Status.APPROVED
+                else None
+            )
+            instance.approved_at = (
+                timezone.now()
+                if instance.status == RuleExclusion.Status.APPROVED
+                else None
+            )
+            instance.save(
+                update_fields=("status", "approved_by", "approved_at", "updated_at")
+            )
             messages.success(
                 request, f"{instance} is now {instance.get_status_display()}."
             )
@@ -203,21 +272,130 @@ class PolicyDeployView(AuditedMutationMixin, LoginRequiredMixin, View):
     audit_action = "policy.deploy"
 
     def post(self, request):
+        mark_audit_failure(request)
+        messages.error(
+            request,
+            "Direct deployment is disabled. Freeze and approve a revision first.",
+        )
+        return redirect("wafinstaller:policy_management")
+
+
+class RuleExclusionUpdateView(AuditedMutationMixin, LoginRequiredMixin, View):
+    login_url = "wafinstaller:login"
+    audit_action = "policy.rule_exclusion.update"
+
+    def post(self, request, object_id):
+        exclusion = get_object_or_404(RuleExclusion, pk=object_id)
+        form = RuleExclusionForm(request.POST, instance=exclusion)
+        if form.is_valid():
+            exclusion = form.save(commit=False)
+            exclusion.status = RuleExclusion.Status.DRAFT
+            exclusion.approved_by = None
+            exclusion.approved_at = None
+            exclusion.save()
+            messages.success(
+                request, f"{exclusion.name} updated and returned to draft."
+            )
+        else:
+            mark_audit_failure(request)
+            _report_form_errors(request, form)
+        return redirect("wafinstaller:policy_management")
+
+
+class PolicyRevisionCreateView(AuditedMutationMixin, LoginRequiredMixin, View):
+    login_url = "wafinstaller:login"
+    audit_action = "policy.revision.create"
+
+    def post(self, request):
         bundle = render_policy()
+        checksum = sha256(
+            (bundle.before + "\0" + bundle.after).encode("utf-8")
+        ).hexdigest()
+        revision, created = PolicyRevision.objects.get_or_create(
+            checksum=checksum,
+            defaults={
+                "before_content": bundle.before,
+                "after_content": bundle.after,
+                "created_by": request.user,
+                "summary": {
+                    "active_exclusions": bundle.active_exclusions,
+                    "active_address_entries": bundle.active_address_entries,
+                    "warnings": list(bundle.warnings),
+                },
+            },
+        )
+        state = "created" if created else "already exists"
+        messages.success(
+            request, f"Candidate revision {revision.checksum[:12]} {state}."
+        )
+        return redirect("wafinstaller:policy_management")
+
+
+class PolicyRevisionMutationView(AuditedMutationMixin, LoginRequiredMixin, View):
+    login_url = "wafinstaller:login"
+    audit_action = "policy.revision.mutate"
+
+    def post(self, request, revision_id, operation):
+        revision = get_object_or_404(PolicyRevision, pk=revision_id)
+        if operation == "approve":
+            if revision.status != PolicyRevision.Status.CANDIDATE:
+                mark_audit_failure(request)
+                messages.error(request, "Only candidate revisions can be approved.")
+            elif (
+                settings.WAFCONTROL_REQUIRE_SEPARATE_APPROVER
+                and revision.created_by_id == request.user.id
+            ):
+                mark_audit_failure(request)
+                messages.error(request, "A different user must approve this revision.")
+            else:
+                revision.status = PolicyRevision.Status.APPROVED
+                revision.approved_by = request.user
+                revision.approved_at = timezone.now()
+                revision.save(update_fields=("status", "approved_by", "approved_at"))
+                messages.success(request, "Immutable revision approved.")
+        elif operation == "deploy":
+            if revision.status != PolicyRevision.Status.APPROVED:
+                mark_audit_failure(request)
+                messages.error(request, "Only approved revisions can be deployed.")
+            else:
+                self._deploy(request, revision)
+        else:
+            mark_audit_failure(request)
+            messages.error(request, "Unsupported revision operation.")
+        return redirect("wafinstaller:policy_management")
+
+    @staticmethod
+    def _deploy(request, revision):
+        bundle = PolicyBundle(
+            before=revision.before_content,
+            after=revision.after_content,
+            active_exclusions=revision.summary.get("active_exclusions", 0),
+            active_address_entries=revision.summary.get("active_address_entries", 0),
+            warnings=tuple(revision.summary.get("warnings", [])),
+        )
         paths = get_paths()
         try:
             changed = deploy_policy_bundle(
-                bundle,
-                test_cmd=paths.test_cmd,
-                reload_cmd=paths.reload_cmd,
-            )
-            messages.success(
-                request,
-                "Policy validated and deployed."
-                if changed
-                else "The generated policy is already active.",
+                bundle, test_cmd=paths.test_cmd, reload_cmd=paths.reload_cmd
             )
         except PolicyDeploymentError as exc:
+            revision.status = PolicyRevision.Status.FAILED
+            revision.deployment_error = str(exc)[:1000]
+            revision.save(update_fields=("status", "deployment_error"))
             mark_audit_failure(request)
             messages.error(request, str(exc))
-        return redirect("wafinstaller:policy_management")
+            return
+        with transaction.atomic():
+            PolicyRevision.objects.filter(
+                status=PolicyRevision.Status.DEPLOYED
+            ).exclude(pk=revision.pk).update(status=PolicyRevision.Status.SUPERSEDED)
+            revision.status = PolicyRevision.Status.DEPLOYED
+            revision.deployed_at = timezone.now()
+            revision.deployment_error = ""
+            revision.save(update_fields=("status", "deployed_at", "deployment_error"))
+        message = (
+            "Approved revision validated and deployed."
+            if changed
+            else "Approved revision was already active."
+        )
+        messages.success(request, message)

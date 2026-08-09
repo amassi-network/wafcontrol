@@ -14,6 +14,7 @@ VER_RE   = re.compile(r'\[ver "([^"]+)"\]')
 REFERER_RE = re.compile(r'REQUEST_HEADERS:Referer:\s*([^\]\n]+)')
 TAGS_RE  = re.compile(r'\[tag "([^"]+)"\]')
 REQ_LINE_RE = re.compile(r'^(GET|POST|HEAD|PUT|DELETE|OPTIONS|PATCH)\s+(\S+)', re.I)
+MATCHED_VAR_RE = re.compile(r"found within ([A-Z][A-Z0-9_]*(?::[A-Za-z0-9_.-]+)?)", re.I)
 H_LINE_RE = re.compile(r'^ModSecurity:.*$', re.M)
 
 ERR_UID_IP_PATTERNS = [
@@ -159,6 +160,14 @@ def uri_from_B_sections(sections: Dict[str, List[str]]) -> Optional[str]:
         m = REQ_LINE_RE.match(ln.strip())
         if m: return m.group(2)
     return None
+
+def method_from_B_sections(sections: Dict[str, List[str]]) -> str:
+    for line in sections.get("B", []):
+        match = REQ_LINE_RE.match(line.strip())
+        if match:
+            return match.group(1).upper()
+    return ""
+
 
 
 def important_enough(msg: str, tags: List[str], blocked: bool, include_protocol_anomalies: bool) -> bool:

@@ -89,6 +89,23 @@ WAFCONTROL_POLICY_DIR=/etc/nginx/modsec/wafcontrol
 The application service account needs write access only to this managed
 directory. It does not need write access to OWASP CRS source files.
 
+### Event triage and frozen revisions
+
+The attack view stores a reviewer classification and notes without altering the
+original WAF event. Parsed events retain the HTTP method, ModSecurity
+transaction ID, matched variable and CRS tags so a draft exclusion can default
+to the narrowest known target.
+
+Managed policy deployment follows a freeze, approve, deploy workflow. Frozen
+contents and their summary are checksum-verified and immutable. Set
+`WAFCONTROL_REQUIRE_SEPARATE_APPROVER=True` to prevent the author from
+approving their own exclusion or revision.
+
+Celery checks expiry every hour. When an active object expires, WAFControl
+regenerates the policy, validates the live Nginx/ModSecurity configuration and
+reloads it. A failed validation restores the database state. The dashboard also
+shows objects and owners due to expire within seven days.
+
 
 
 

@@ -52,14 +52,20 @@ clean 0002 to 0003 migration, migration drift detection, full Ruff checks on
 the touched Python modules, shell syntax checks, and Git whitespace checks all
 pass.
 
-## Milestone 3B — Triage and policy revision workflow
+## Milestone 3B — Triage and policy revision workflow (completed)
 
-- classify events as attack, false positive, authorised traffic, known scanner or unknown;
-- extract the precise matched variable from normalized ModSecurity events;
+- classify events as attack, false positive, authorised traffic, known scanner or needs analysis;
+- retain method, transaction ID, CRS tags and the precise matched variable from normalized ModSecurity events;
 - preview both affected and suspicious historical events;
-- add immutable policy revisions and a two-person approval option;
-- schedule automatic expiry and notify owners before exceptions expire;
-- add edit/clone operations and regression fixtures executed against ModSecurity.
+- freeze checksum-verified policy revisions and optionally require a different approver;
+- deploy only approved frozen content, with Nginx/ModSecurity validation and rollback;
+- expire exceptions automatically, reload the effective policy and restore state if validation fails;
+- show owners and entries due to expire within seven days;
+- edit or clone exclusions while always returning changed objects to Draft;
+- exercise representative ModSecurity audit fixtures through both Nginx and Apache parsers.
+
+Verification completed on 9 August 2026: 43 Django tests, Django system checks,
+migration drift detection, Python syntax checks, and Git whitespace checks pass.
 
 ## Milestone 4 — Applications and policies
 
