@@ -1,110 +1,180 @@
 #!/usr/bin/env bash
-# switch_crs_version.sh
-# Usage: ./switch_crs_version.sh <version-tag>   (e.g. v4.18.0 or 4.18.0)
+# Safely switch to a selected stable CRS release.
 set -euo pipefail
-
-VERSION="${1:-}"; [[ -n "$VERSION" ]] || { echo "Usage: $0 <version-tag>"; exit 1; }
-[[ "$VERSION" == v* ]] || VERSION="v$VERSION"
-VERSION_NUM="${VERSION#v}"
 
 export PATH="/usr/sbin:/usr/bin:/sbin:/bin:/usr/local/bin:$PATH"
 
-# detect server
-SERVER="none"
-if systemctl is-active --quiet nginx; then SERVER="nginx"
-elif systemctl is-active --quiet apache2 || systemctl is-active --quiet httpd; then SERVER="apache"
-elif command -v nginx >/dev/null 2>&1; then SERVER="nginx"
-elif command -v apache2 >/dev/null 2>&1 || command -v httpd >/dev/null 2>&1; then SERVER="apache"
+VERSION="${1:-}"
+[[ "$VERSION" == v* ]] || VERSION="v$VERSION"
+VERSION_NUM="${VERSION#v}"
+if [[ ! "$VERSION_NUM" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+  echo "[✗] Invalid CRS version. Expected vMAJOR.MINOR.PATCH."
+  exit 2
 fi
-[[ "$SERVER" != "none" ]] || { echo "[!] No nginx/apache found."; exit 1; }
 
-# tools
-need() { for t in "$@"; do command -v "$t" >/dev/null 2>&1 || M+=("$t"); done; [[ -z "${M[*]-}" ]] || (apt-get update -y && apt-get install -y "${M[@]}"); }
-M=(); need curl jq wget tar gzip
+for tool in wget tar; do
+  if ! command -v "$tool" >/dev/null 2>&1; then
+    echo "[✗] Required tool is missing: $tool"
+    exit 1
+  fi
+done
 
-TMP_DIR="$(mktemp -d -t crs-switch-XXXXXX)"; trap 'rm -rf "$TMP_DIR"' EXIT
+SERVER="none"
+if systemctl is-active --quiet nginx || command -v nginx >/dev/null 2>&1; then
+  SERVER="nginx"
+elif systemctl is-active --quiet apache2 || systemctl is-active --quiet httpd; then
+  SERVER="apache"
+elif command -v apache2ctl >/dev/null 2>&1 || command -v httpd >/dev/null 2>&1; then
+  SERVER="apache"
+fi
+if [[ "$SERVER" == "none" ]]; then
+  echo "[✗] No Nginx or Apache server was detected."
+  exit 1
+fi
+
+TMP_DIR="$(mktemp -d -t crs-switch-XXXXXX)"
+trap 'rm -rf "$TMP_DIR"' EXIT
 
 if [[ "$SERVER" == "nginx" ]]; then
   CRS_PARENT="/etc/nginx/modsec"
   MAIN_CONF="${CRS_PARENT}/main.conf"
+  TARGET_DIR="${CRS_PARENT}/coreruleset-${VERSION_NUM}"
   TEST_CMD=(nginx -t)
   RELOAD_CMD=(nginx -s reload)
-  TARGET_DIR="${CRS_PARENT}/coreruleset-${VERSION_NUM}"
 else
-  MODSEC_ETC="/etc/modsecurity"
-  CRS_ROOT="${MODSEC_ETC}/crs"
-  CRS_VERSIONS="${CRS_ROOT}/versions"
-  CRS_CURRENT="${CRS_ROOT}/current"
-  mkdir -p "$CRS_VERSIONS"
-  TEST_CMD=(apache2ctl configtest)
-  RELOAD_CMD=(systemctl reload apache2)
-  TARGET_DIR="${CRS_VERSIONS}/coreruleset-${VERSION_NUM}"
+  CRS_PARENT="/etc/modsecurity/crs/versions"
+  CRS_CURRENT="/etc/modsecurity/crs/current"
+  MAIN_CONF="/etc/modsecurity/modsecurity.conf"
+  TARGET_DIR="${CRS_PARENT}/coreruleset-${VERSION_NUM}"
+  if command -v apache2ctl >/dev/null 2>&1; then
+    TEST_CMD=(apache2ctl configtest)
+    RELOAD_CMD=(systemctl reload apache2)
+  else
+    TEST_CMD=(httpd -t)
+    RELOAD_CMD=(systemctl reload httpd)
+  fi
 fi
 
-echo "[+] Server: $SERVER"
-echo "[+] Target CRS: $VERSION -> $TARGET_DIR"
+active_version() {
+  local active=""
+  if [[ "$SERVER" == "nginx" && -f "$MAIN_CONF" ]]; then
+    active="$(grep -Eo 'coreruleset-[0-9]+\.[0-9]+\.[0-9]+' "$MAIN_CONF" | head -n1 | sed 's/coreruleset-//' || true)"
+  elif [[ "$SERVER" == "apache" && -L "$CRS_CURRENT" ]]; then
+    active="$(readlink -f "$CRS_CURRENT" | grep -Eo 'coreruleset-[0-9]+\.[0-9]+\.[0-9]+' | head -n1 | sed 's/coreruleset-//' || true)"
+  fi
+  printf '%s' "$active"
+}
 
-# download if missing
-if [[ ! -d "$TARGET_DIR/rules" ]]; then
-  echo "[+] Downloading $VERSION …"
+ACTIVE_VERSION="$(active_version)"
+echo "[+] Server: $SERVER"
+echo "[+] Target CRS: $VERSION"
+if [[ "$ACTIVE_VERSION" == "$VERSION_NUM" ]]; then
+  echo "[=] CRS $VERSION_NUM is already active. No configuration change and no reload required."
+  exit 0
+fi
+
+mkdir -p "$CRS_PARENT"
+if [[ -d "$TARGET_DIR/rules" ]]; then
+  echo "[=] CRS $VERSION already downloaded."
+elif [[ -e "$TARGET_DIR" ]]; then
+  echo "[✗] CRS target exists but is incomplete: $TARGET_DIR"
+  exit 1
+else
+  echo "[+] Downloading $VERSION..."
   wget -q "https://github.com/coreruleset/coreruleset/archive/refs/tags/${VERSION}.tar.gz" -O "$TMP_DIR/crs.tgz"
   tar -xzf "$TMP_DIR/crs.tgz" -C "$TMP_DIR"
-  mv "$TMP_DIR/coreruleset-${VERSION_NUM}" "$TARGET_DIR"
+  EXTRACTED="$TMP_DIR/coreruleset-${VERSION_NUM}"
+  if [[ ! -d "$EXTRACTED/rules" ]]; then
+    echo "[✗] Downloaded CRS archive is incomplete."
+    exit 1
+  fi
+  mv "$EXTRACTED" "$TARGET_DIR"
 fi
 
-# ensure setup & optional files
 if [[ -f "$TARGET_DIR/crs-setup.conf.example" && ! -f "$TARGET_DIR/crs-setup.conf" ]]; then
   cp "$TARGET_DIR/crs-setup.conf.example" "$TARGET_DIR/crs-setup.conf"
 fi
-if [[ -f "$TARGET_DIR/rules/REQUEST-900-EXCLUSION-RULES-BEFORE-CRS.conf.example" && ! -f "$TARGET_DIR/rules/REQUEST-900-EXCLUSION-RULES-BEFORE-CRS.conf" ]]; then
-  cp "$TARGET_DIR/rules/REQUEST-900-EXCLUSION-RULES-BEFORE-CRS.conf.example" "$TARGET_DIR/rules/REQUEST-900-EXCLUSION-RULES-BEFORE-CRS.conf"
-fi
-if [[ -f "$TARGET_DIR/rules/RESPONSE-999-EXCLUSION-RULES-AFTER-CRS.conf.example" && ! -f "$TARGET_DIR/rules/RESPONSE-999-EXCLUSION-RULES-AFTER-CRS.conf" ]]; then
-  cp "$TARGET_DIR/rules/RESPONSE-999-EXCLUSION-RULES-AFTER-CRS.conf.example" "$TARGET_DIR/rules/RESPONSE-999-EXCLUSION-RULES-AFTER-CRS.conf"
-fi
-if [[ -f "$TARGET_DIR/rules/REQUEST-900-EXCLUSION-RULES-BEFORE-CRS.conf" ]] && \
-   ! grep -q 'id:1500010' "$TARGET_DIR/rules/REQUEST-900-EXCLUSION-RULES-BEFORE-CRS.conf"; then
-  cat >> "$TARGET_DIR/rules/REQUEST-900-EXCLUSION-RULES-BEFORE-CRS.conf" <<'EOR'
+for exclusion in REQUEST-900-EXCLUSION-RULES-BEFORE-CRS RESPONSE-999-EXCLUSION-RULES-AFTER-CRS; do
+  if [[ -f "$TARGET_DIR/rules/${exclusion}.conf.example" && ! -f "$TARGET_DIR/rules/${exclusion}.conf" ]]; then
+    cp "$TARGET_DIR/rules/${exclusion}.conf.example" "$TARGET_DIR/rules/${exclusion}.conf"
+  fi
+done
+
+# Preserve the dashboard self-protection exclusions until they are migrated to
+# WAFControl-owned exclusion files in milestone 3.
+DASHBOARD_EXCLUSIONS="$TARGET_DIR/rules/REQUEST-900-EXCLUSION-RULES-BEFORE-CRS.conf"
+if [[ -f "$DASHBOARD_EXCLUSIONS" ]] && ! grep -q 'id:1500010' "$DASHBOARD_EXCLUSIONS"; then
+  cat >> "$DASHBOARD_EXCLUSIONS" <<'EOR'
 # WAF dashboard exclusions
-SecRule REQUEST_URI "@beginsWith /crs/rules/save/"        "id:1500010,phase:1,nolog,pass,ctl:ruleEngine=Off"
+SecRule REQUEST_URI "@beginsWith /crs/rules/save/"         "id:1500010,phase:1,nolog,pass,ctl:ruleEngine=Off"
 SecRule REQUEST_URI "@beginsWith /dashboard/crs/settings/" "id:1500011,phase:1,nolog,pass,ctl:ruleEngine=Off"
 EOR
 fi
 
-# wire in
+CONF_EXISTED=0
+if [[ -f "$MAIN_CONF" ]]; then
+  cp -a "$MAIN_CONF" "$TMP_DIR/main.conf.previous"
+  CONF_EXISTED=1
+fi
+PREVIOUS_LINK=""
+if [[ "$SERVER" == "apache" && -L "$CRS_CURRENT" ]]; then
+  PREVIOUS_LINK="$(readlink -f "$CRS_CURRENT")"
+fi
+
+rollback() {
+  if [[ "$CONF_EXISTED" -eq 1 ]]; then
+    cp -a "$TMP_DIR/main.conf.previous" "$MAIN_CONF"
+  else
+    rm -f "$MAIN_CONF"
+  fi
+  if [[ "$SERVER" == "apache" ]]; then
+    if [[ -n "$PREVIOUS_LINK" ]]; then
+      ln -sfn "$PREVIOUS_LINK" "$CRS_CURRENT"
+    else
+      rm -f "$CRS_CURRENT"
+    fi
+  fi
+}
+
 if [[ "$SERVER" == "nginx" ]]; then
-  mkdir -p "$(dirname "$MAIN_CONF")"
-  touch "$MAIN_CONF"
-  sed -i '/Include .*crs-setup\.conf/d' "$MAIN_CONF" || true
-  sed -i '/Include .*rules\/\*\.conf/d' "$MAIN_CONF" || true
+  if [[ -f "$MAIN_CONF" ]]; then
+    sed '/Include .*crs-setup\.conf/d; /Include .*rules\/\*\.conf/d' "$MAIN_CONF" > "$TMP_DIR/main.conf.candidate"
+  else
+    : > "$TMP_DIR/main.conf.candidate"
+  fi
   {
     echo "Include $TARGET_DIR/crs-setup.conf"
     echo "Include $TARGET_DIR/rules/*.conf"
-  } >> "$MAIN_CONF"
+  } >> "$TMP_DIR/main.conf.candidate"
+  cp "$TMP_DIR/main.conf.candidate" "$MAIN_CONF"
 else
-  # Apache: just switch "current" and keep modsecurity.conf pointing to current/*
+  mkdir -p "$(dirname "$CRS_CURRENT")"
   ln -sfn "$TARGET_DIR" "$CRS_CURRENT"
-  chown -h root:root "$CRS_CURRENT"
-  find "$TARGET_DIR" -type d -exec chmod 755 {} \;
-  find "$TARGET_DIR" -type f -exec chmod 644 {} \;
-
-  MODSEC_CONF="/etc/modsecurity/modsecurity.conf"
-  # replace any existing includes to always use /etc/modsecurity/crs/current/*
-  if grep -q 'crs-setup.conf' "$MODSEC_CONF"; then
-    sed -i -E 's#^[[:space:]]*Include(Optional)?[[:space:]]+.*/crs-setup\.conf#IncludeOptional /etc/modsecurity/crs/current/crs-setup.conf#' "$MODSEC_CONF"
+  if [[ -f "$MAIN_CONF" ]]; then
+    sed -E \
+      -e 's#^[[:space:]]*Include(Optional)?[[:space:]]+.*/crs-setup\.conf#IncludeOptional /etc/modsecurity/crs/current/crs-setup.conf#' \
+      -e 's#^[[:space:]]*Include(Optional)?[[:space:]]+.*/rules/\*\.conf#IncludeOptional /etc/modsecurity/crs/current/rules/*.conf#' \
+      "$MAIN_CONF" > "$TMP_DIR/main.conf.candidate"
   else
-    echo 'IncludeOptional /etc/modsecurity/crs/current/crs-setup.conf' >> "$MODSEC_CONF"
+    : > "$TMP_DIR/main.conf.candidate"
   fi
-  if grep -q '/rules/\*\.conf' "$MODSEC_CONF"; then
-    sed -i -E 's#^[[:space:]]*Include(Optional)?[[:space:]]+.*/rules/\*\.conf#IncludeOptional /etc/modsecurity/crs/current/rules/*.conf#' "$MODSEC_CONF"
-  else
-    echo 'IncludeOptional /etc/modsecurity/crs/current/rules/*.conf' >> "$MODSEC_CONF"
-  fi
+  grep -q 'crs/current/crs-setup.conf' "$TMP_DIR/main.conf.candidate" || echo 'IncludeOptional /etc/modsecurity/crs/current/crs-setup.conf' >> "$TMP_DIR/main.conf.candidate"
+  grep -q 'crs/current/rules/\*\.conf' "$TMP_DIR/main.conf.candidate" || echo 'IncludeOptional /etc/modsecurity/crs/current/rules/*.conf' >> "$TMP_DIR/main.conf.candidate"
+  cp "$TMP_DIR/main.conf.candidate" "$MAIN_CONF"
 fi
 
-# test & reload
-echo "[+] Testing config…"
-"${TEST_CMD[@]}"
-echo "[+] Reloading…"
-"${RELOAD_CMD[@]}" || true
-echo "[✓] Switched to $VERSION."
+if ! "${TEST_CMD[@]}" >/dev/null 2>&1; then
+  echo "[✗] Configuration validation failed; restoring the previous version."
+  rollback
+  "${TEST_CMD[@]}" || true
+  exit 1
+fi
+if ! "${RELOAD_CMD[@]}" >/dev/null 2>&1; then
+  echo "[✗] Reload failed; restoring and reloading the previous version."
+  rollback
+  "${TEST_CMD[@]}" || true
+  "${RELOAD_CMD[@]}" >/dev/null 2>&1 || true
+  exit 1
+fi
+
+echo "[✓] Switched to $VERSION and reloaded $SERVER."

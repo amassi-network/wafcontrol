@@ -1,7 +1,7 @@
-from django.contrib.auth.models import AbstractUser, User
+from django.conf import settings
+from django.contrib.auth.models import User
 from django.db import models
 from django.utils.timezone import now
-
 
 # Create your models here.
 
@@ -60,3 +60,28 @@ class AppSetting(models.Model):
 
     def __str__(self):
         return f"{self.key} = {self.value}"
+
+class AuditEntry(models.Model):
+    class Outcome(models.TextChoices):
+        SUCCEEDED = "succeeded", "Succeeded"
+        FAILED = "failed", "Failed"
+
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+    actor = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="waf_audit_entries",
+    )
+    action = models.CharField(max_length=100, db_index=True)
+    target = models.CharField(max_length=500)
+    outcome = models.CharField(max_length=16, choices=Outcome.choices)
+    remote_addr = models.GenericIPAddressField(null=True, blank=True)
+    details = models.JSONField(default=dict, blank=True)
+
+    class Meta:
+        ordering = ("-created_at", "-id")
+
+    def __str__(self):
+        return f"{self.created_at} {self.action} {self.outcome}"

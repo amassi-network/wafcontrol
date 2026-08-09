@@ -18,8 +18,8 @@ __pycache__/
 # macOS junk
 .DS_Store
 
-# Django migrations (all apps)
-**/migrations/
+# Django migration bytecode (migration source files are versioned)
+**/migrations/__pycache__/
 
 # Celery Beat scheduler files
 celerybeat-schedule

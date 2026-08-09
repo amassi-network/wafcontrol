@@ -34,6 +34,28 @@ chmod +x install.sh
 sudo ./install.sh
 ```
 
+### Database migrations
+
+Migration source files are versioned in the repository. On a new installation,
+apply them with:
+
+```bash
+python manage.py migrate
+```
+
+Older WAFControl installations created application tables through Django's
+`--run-syncdb` fallback and do not have a migration history for `wafinstaller`.
+Back up PostgreSQL, then adopt the initial migration and create newer tables
+with:
+
+```bash
+python manage.py migrate --fake-initial
+python manage.py showmigrations wafinstaller
+```
+
+Do not use `--fake` for later migrations. Review the migration plan and keep a
+database backup before every upgrade.
+
 
 
 ## WAFControl Features

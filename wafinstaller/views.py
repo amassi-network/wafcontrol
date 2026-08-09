@@ -5,44 +5,50 @@ import os
 import re
 import subprocess
 from collections import Counter
+from pathlib import Path
 
 import matplotlib.pyplot as plt
 import pyotp
 import qrcode
 from celery.result import AsyncResult
-from packaging.version import Version
 from django.contrib import messages
 from django.contrib.auth import get_user_model, login, update_session_auth_hash
 from django.contrib.auth.decorators import login_required
 from django.contrib.auth.mixins import LoginRequiredMixin
-from django.contrib.auth.views import LoginView, LogoutView as DjangoLogoutView
-from django.db import models
-from django.db.models import Q, Count
+from django.contrib.auth.views import LoginView
+from django.contrib.auth.views import LogoutView as DjangoLogoutView
+from django.db.models import Count, Q
 from django.http import JsonResponse
 from django.shortcuts import redirect, render
 from django.urls import reverse
 from django.utils.decorators import method_decorator
 from django.utils.translation import gettext_lazy as _
 from django.views import View
-from django.views.decorators.csrf import csrf_exempt, csrf_protect
+from django.views.decorators.csrf import csrf_protect
 from django.views.decorators.debug import sensitive_post_parameters
 from django.views.decorators.http import require_POST
 from django.views.generic import ListView, TemplateView
+from packaging.version import Version
 
-from wafinstaller.helper.adapters import get_paths, custom_after_path as _custom_after_path
+from wafinstaller.audit import (
+    AuditedMutationMixin,
+    audit_mutation,
+    mark_audit_failure,
+)
+from wafinstaller.helper.adapters import custom_after_path as _custom_after_path
+from wafinstaller.helper.adapters import get_paths
 from wafinstaller.helper.crs import (
-    MODSEC_KEYS,
-    MODSEC_KEY_DESCRIPTIONS,
-    RULE_PATTERN,
     APP_KEYS,
+    MODSEC_KEY_DESCRIPTIONS,
+    MODSEC_KEYS,
+    RULE_PATTERN,
     load_app_settings,
     save_app_settings,
 )
-from .forms import AdminLogin, AdminPasswordForm, AdminProfileForm
 from wafinstaller.helper.helpers import (
+    get_crs_version_status,
     get_installed_crs_version,
     get_latest_crs_version,
-    get_crs_version_status,
     is_crs_update_available,
     normalize_version,
     parse_crs_version,
@@ -50,11 +56,104 @@ from wafinstaller.helper.helpers import (
     run_switch_version_script,
     run_updatecrs_script,
 )
+from wafinstaller.helper.utils import get_crs_full_version, get_rules_dir
+from wafinstaller.security import (
+    DeploymentError,
+    ManagedFileError,
+    deploy_managed_text,
+    resolve_managed_file,
+)
+
+from .forms import AdminLogin, AdminPasswordForm, AdminProfileForm
 from .models import Attack, CrsVersion, DashboardStat, UserProfile
 from .tasks import fetch_crs_versions_task, run_waf_install
-from wafinstaller.helper.utils import get_crs_full_version, get_rules_dir
 
 User = get_user_model()
+
+
+def _rule_file(filename, *, allowed_suffixes=(".conf", ".data")):
+    version = get_crs_full_version()
+    rule_dir = get_rules_dir(version)
+    return resolve_managed_file(
+        rule_dir, filename, allowed_suffixes=allowed_suffixes
+    )
+
+
+def _active_custom_rule_file(requested_version=None):
+    active_version = normalize_version(get_crs_full_version())
+    requested = normalize_version(requested_version or active_version)
+    if not active_version or requested != active_version:
+        raise ManagedFileError("Only the active CRS version can be modified.")
+    rule_dir = get_rules_dir(active_version)
+    expected_name = os.path.basename(_custom_after_path(active_version))
+    return resolve_managed_file(
+        rule_dir, expected_name, allowed_suffixes=(".conf",)
+    ), active_version
+
+
+def _deploy_text(path, content):
+    paths = get_paths()
+    return deploy_managed_text(
+        path, content, test_cmd=paths.test_cmd, reload_cmd=paths.reload_cmd
+    )
+
+
+_ALLOWED_RULE_ACTIONS = {"deny", "pass", "allow", "drop", "log", "nolog"}
+_ALLOWED_RULE_PHASES = {"1", "2", "3", "4", "5"}
+
+
+def _safe_rule_fragment(value, field, *, max_length=1024, allow_single_quote=False):
+    value = (value or "").strip()
+    forbidden = "\r\n\x00\"" + ("" if allow_single_quote else "'")
+    if not value or len(value) > max_length or any(char in value for char in forbidden):
+        raise ManagedFileError(f"Invalid {field}.")
+    return value
+
+
+def _build_custom_rule(request):
+    rule_id = str(request.POST.get("id", ""))
+    phase = str(request.POST.get("phase", ""))
+    action = str(request.POST.get("action", ""))
+    if not rule_id.isdigit() or len(rule_id) > 12:
+        raise ManagedFileError("A numeric custom rule ID is required.")
+    if phase not in _ALLOWED_RULE_PHASES or action not in _ALLOWED_RULE_ACTIONS:
+        raise ManagedFileError("Invalid rule phase or action.")
+
+    variable = _safe_rule_fragment(request.POST.get("variable"), "rule variable", max_length=255)
+    if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_:.&!\-]*", variable):
+        raise ManagedFileError("Invalid rule variable.")
+    operator = _safe_rule_fragment(
+        request.POST.get("operator"), "rule operator", allow_single_quote=True
+    )
+    actions = [f"id:{rule_id}", f"phase:{phase}", action]
+    if request.POST.get("capture"):
+        actions.append("capture")
+
+    optional_single = (
+        ("msg", request.POST.get("comment")),
+        ("severity", request.POST.get("severity")),
+        ("ver", request.POST.get("ver", "OWASP_CRS/4")),
+    )
+    for key, raw_value in optional_single:
+        if raw_value:
+            value = _safe_rule_fragment(raw_value, key, max_length=255)
+            actions.append(f"{key}:'{value}'")
+
+    for raw_tag in request.POST.get("tag", "").split(","):
+        if raw_tag.strip():
+            tag = _safe_rule_fragment(raw_tag, "tag", max_length=255)
+            actions.append(f"tag:'{tag}'")
+    for raw_transform in request.POST.get("transformations", "").split(","):
+        transform = raw_transform.strip()
+        if transform.startswith("t:"):
+            transform = transform[2:]
+        if transform:
+            transform = _safe_rule_fragment(transform, "transformation", max_length=100)
+            if not re.fullmatch(r"[A-Za-z0-9_\-]+", transform):
+                raise ManagedFileError("Invalid transformation.")
+            actions.append(f"t:{transform}")
+
+    return rule_id, f'SecRule {variable} "{operator}" "{",".join(actions)}"\n'
 
 
 # -------------------------
@@ -154,6 +253,7 @@ class HomeRedirectView(View):
 
 @login_required
 @require_POST
+@audit_mutation("waf.install")
 def install_waf_page(request):
     """Kick off WAF installation if not installed (uses celery task)."""
     try:
@@ -164,42 +264,31 @@ def install_waf_page(request):
         else:
             run_waf_install.delay()
             messages.success(request, "WAF installation has been started.")
-    except Exception as e:
-        messages.error(request, f"Error checking WAF status: {e}")
+    except Exception:
+        mark_audit_failure(request)
+        messages.error(request, "Unable to start WAF installation.")
     return redirect("wafinstaller:dashboard")
 
-
-@csrf_exempt
-def install_waf(request):
-    if request.method != "POST":
-        return JsonResponse({"error": "Method Not Allowed"}, status=405)
-    task = run_waf_install.delay()
-    return JsonResponse({"task_id": task.id})
-
-
-@csrf_exempt
-def install_status(request, task_id):
-    result = AsyncResult(task_id)
-    data = {"state": result.state, "result": result.result}
-    if result.state == "PROGRESS":
-        data["line"] = result.info.get("line") if result.info else None
-    elif result.state == "FAILURE":
-        data["error"] = str(result.result)
-    return JsonResponse(data)
 
 
 # -------------------------
 # Dashboard
 # -------------------------
 
-class DashboardView(LoginRequiredMixin, TemplateView):
+class DashboardView(AuditedMutationMixin, LoginRequiredMixin, TemplateView):
+    audit_action = "crs.update"
     template_name = "dashboard/panel/panel.html"
     login_url = "wafinstaller:login"
 
     def post(self, request):
         """Manual CRS update from UI (sync)."""
         exit_code, log = run_updatecrs_script()
-        return JsonResponse({"status": "done", "exit_code": exit_code, "log": log})
+        if exit_code != 0:
+            mark_audit_failure(request)
+        return JsonResponse(
+            {"status": "done", "exit_code": exit_code, "log": log},
+            status=200 if exit_code == 0 else 409,
+        )
 
     def get_context_data(self, **kwargs):
         context = super().get_context_data(**kwargs)
@@ -403,12 +492,18 @@ class CriticalWafAttacksView(LoginRequiredMixin, ListView):
 # CRS update (sync)
 # -------------------------
 
-class CrsUpdateSyncView(LoginRequiredMixin, View):
+class CrsUpdateSyncView(AuditedMutationMixin, LoginRequiredMixin, View):
+    audit_action = "crs.update"
     login_url = "wafinstaller:login"
 
     def post(self, request):
         exit_code, log = run_updatecrs_script()
-        return JsonResponse({"status": "done", "exit_code": exit_code, "log": log})
+        if exit_code != 0:
+            mark_audit_failure(request)
+        return JsonResponse(
+            {"status": "done", "exit_code": exit_code, "log": log},
+            status=200 if exit_code == 0 else 409,
+        )
 
 
 @method_decorator(login_required, name="dispatch")
@@ -460,42 +555,42 @@ class ReadCRSRuleView(LoginRequiredMixin, View):
     login_url = "wafinstaller:login"
 
     def get(self, request, filename):
-        version = get_crs_full_version()
-        rule_dir = get_rules_dir(version)
-        file_path = os.path.join(rule_dir, filename)
-
         try:
-            if os.path.isfile(file_path):
-                with open(file_path, "r") as f:
-                    content = f.read()
-                return JsonResponse({"success": True, "content": content})
-            else:
-                return JsonResponse({"success": False, "error": "File not found."})
-        except Exception as e:
-            return JsonResponse({"success": False, "error": str(e)})
+            file_path = _rule_file(filename)
+            return JsonResponse(
+                {"success": True, "content": file_path.read_text(encoding="utf-8")}
+            )
+        except ManagedFileError as exc:
+            return JsonResponse({"success": False, "error": str(exc)}, status=400)
+        except (OSError, UnicodeError):
+            return JsonResponse(
+                {"success": False, "error": "Unable to read the managed file."},
+                status=500,
+            )
 
 
-@method_decorator(csrf_exempt, name="dispatch")
-class SaveCRSRuleView(LoginRequiredMixin, View):
+class SaveCRSRuleView(AuditedMutationMixin, LoginRequiredMixin, View):
+    audit_action = "crs.rule.save"
     login_url = "wafinstaller:login"
 
     def post(self, request, filename):
         try:
             data = json.loads(request.body)
-            content = data.get("content", "")
-            version = get_crs_full_version()
-            rule_dir = get_rules_dir(version)
-            file_path = os.path.join(rule_dir, filename)
-
-            if os.path.isfile(file_path):
-                with open(file_path, "w") as f:
-                    f.write(content)
-                return JsonResponse({"success": True})
-            else:
-                return JsonResponse({"success": False, "error": "File not found."})
-        except Exception as e:
-            return JsonResponse({"success": False, "error": str(e)})
-
+            content = data.get("content")
+            if not isinstance(content, str):
+                raise ManagedFileError("Rule content must be a string.")
+            file_path = _rule_file(filename)
+            changed = _deploy_text(file_path, content)
+            return JsonResponse({"success": True, "changed": changed})
+        except (json.JSONDecodeError, ManagedFileError) as exc:
+            return JsonResponse({"success": False, "error": str(exc)}, status=400)
+        except DeploymentError as exc:
+            return JsonResponse({"success": False, "error": str(exc)}, status=409)
+        except (OSError, UnicodeError):
+            return JsonResponse(
+                {"success": False, "error": "Unable to update the managed file."},
+                status=500,
+            )
 
 class CRSCategoriesView(LoginRequiredMixin, TemplateView):
     template_name = "dashboard/panel/crs_categories.html"
@@ -520,209 +615,186 @@ class CRSRuleListByFileView(LoginRequiredMixin, TemplateView):
         context = super().get_context_data(**kwargs)
         version = get_crs_full_version()
         filename = kwargs.get("filename")
-        rule_dir = get_rules_dir(version)
-        file_path = os.path.join(rule_dir, filename)
-
         rules = []
-        if os.path.isfile(file_path):
-            try:
-                with open(file_path, "r") as f:
-                    lines = f.readlines()
-
-                i = 0
-                while i < len(lines):
-                    line = lines[i]
-                    raw_lines = [line]
-                    start_index = i
-                    if re.search(r"(SecRule|SecAction)", line):
-                        while line.rstrip().endswith("\\") and i + 1 < len(lines):
-                            i += 1
-                            line = lines[i]
-                            raw_lines.append(line)
-                        full_rule = "".join(raw_lines)
-                        rid = re.search(r'id\s*:\s*"?(\d+)"?', full_rule)
-                        msg = re.search(r"msg\s*:\s*'(.*?)'", full_rule)
-                        rules.append(
-                            {
-                                "id": rid.group(1) if rid else "unknown",
-                                "msg": msg.group(1) if msg else "",
-                                "enabled": not all(
-                                    ln.lstrip().startswith("#") for ln in raw_lines
-                                ),
-                                "filename": filename,
-                                "line_number": start_index + 1,
-                                "raw": "".join(raw_lines).strip(),
-                            }
-                        )
-                    i += 1
-            except Exception as e:
-                # Keep silent in UI, only log
-                print(f"Error reading {file_path}: {e}")
+        try:
+            file_path = _rule_file(filename, allowed_suffixes=(".conf",))
+            lines = file_path.read_text(encoding="utf-8").splitlines(keepends=True)
+            i = 0
+            while i < len(lines):
+                line = lines[i]
+                raw_lines = [line]
+                start_index = i
+                if re.search(r"(SecRule|SecAction)", line):
+                    while line.rstrip().endswith("\\") and i + 1 < len(lines):
+                        i += 1
+                        line = lines[i]
+                        raw_lines.append(line)
+                    full_rule = "".join(raw_lines)
+                    rid = re.search(r'id\s*:\s*"?(\d+)"?', full_rule)
+                    msg = re.search(r"msg\s*:\s*'(.*?)'", full_rule)
+                    rules.append(
+                        {
+                            "id": rid.group(1) if rid else "unknown",
+                            "msg": msg.group(1) if msg else "",
+                            "enabled": not all(
+                                item.lstrip().startswith("#") for item in raw_lines
+                            ),
+                            "filename": filename,
+                            "line_number": start_index + 1,
+                            "raw": "".join(raw_lines).strip(),
+                        }
+                    )
+                i += 1
+        except ManagedFileError as exc:
+            messages.error(self.request, str(exc))
+        except (OSError, UnicodeError):
+            messages.error(self.request, "Unable to read the managed rule file.")
 
         context.update({"rules": rules, "filename": filename, "crs_version": version})
         return context
 
-
-@method_decorator(csrf_exempt, name="dispatch")
-class ToggleCRSRuleView(LoginRequiredMixin, View):
+class ToggleCRSRuleView(AuditedMutationMixin, LoginRequiredMixin, View):
+    audit_action = "crs.rule.toggle"
     login_url = "wafinstaller:login"
 
     def post(self, request):
         try:
             data = json.loads(request.body)
-            rule_id = data.get("rule_id")
+            rule_id = str(data.get("rule_id", ""))
             filename = data.get("filename")
             enable = data.get("enable") is True
+            if not rule_id.isdigit() or not isinstance(filename, str):
+                raise ManagedFileError("A numeric rule ID and filename are required.")
 
-            if not rule_id or not filename:
-                return JsonResponse(
-                    {"success": False, "error": "Missing rule_id or filename"}
-                )
-
-            version = get_crs_full_version()
-            rule_dir = get_rules_dir(version)
-            file_path = os.path.join(rule_dir, filename)
-
-            if not os.path.isfile(file_path):
-                return JsonResponse(
-                    {"success": False, "error": "Rule file not found."}
-                )
-
-            with open(file_path, "r") as f:
-                lines = f.readlines()
-
-            new_lines, found, i = [], False, 0
-            while i < len(lines):
-                line = lines[i]
+            file_path = _rule_file(filename, allowed_suffixes=(".conf",))
+            lines = file_path.read_text(encoding="utf-8").splitlines(keepends=True)
+            new_lines, found, index = [], False, 0
+            while index < len(lines):
+                line = lines[index]
                 if re.search(r"^\s*(#\s*)?(SecRule|SecAction)", line):
-                    temp_lines, rule_text = [line], line
-                    i += 1
-                    while i < len(lines) and (
-                        lines[i].rstrip().endswith("\\")
+                    rule_lines, rule_text = [line], line
+                    index += 1
+                    while index < len(lines) and (
+                        lines[index].rstrip().endswith("\\")
                         or not re.search(
-                            r"^\s*(#\s*)?(SecRule|SecAction)", lines[i]
+                            r"^\s*(#\s*)?(SecRule|SecAction)", lines[index]
                         )
                     ):
-                        temp_lines.append(lines[i])
-                        rule_text += lines[i]
-                        i += 1
+                        rule_lines.append(lines[index])
+                        rule_text += lines[index]
+                        index += 1
                     if re.search(
-                        r'id\s*:\s*"?'
-                        + re.escape(rule_id)
-                        + r'"?',
-                        rule_text,
+                        r'id\s*:\s*"?' + re.escape(rule_id) + r'"?', rule_text
                     ):
                         found = True
                         if enable:
                             new_lines.extend(
-                                [re.sub(r"^\s*#\s*", "", l) for l in temp_lines]
+                                [re.sub(r"^\s*#\s*", "", item) for item in rule_lines]
                             )
                         else:
                             new_lines.extend(
                                 [
-                                    "# " + l
-                                    if not l.strip().startswith("#")
-                                    else l
-                                    for l in temp_lines
+                                    "# " + item
+                                    if not item.strip().startswith("#")
+                                    else item
+                                    for item in rule_lines
                                 ]
                             )
                     else:
-                        new_lines.extend(temp_lines)
+                        new_lines.extend(rule_lines)
                 else:
                     new_lines.append(line)
-                    i += 1
+                    index += 1
 
             if not found:
                 return JsonResponse(
-                    {"success": False, "error": f"Rule ID {rule_id} not found."}
+                    {"success": False, "error": f"Rule ID {rule_id} not found."},
+                    status=404,
                 )
+            changed = _deploy_text(file_path, "".join(new_lines))
+            return JsonResponse(
+                {"success": True, "enabled": enable, "changed": changed}
+            )
+        except (json.JSONDecodeError, ManagedFileError) as exc:
+            return JsonResponse({"success": False, "error": str(exc)}, status=400)
+        except DeploymentError as exc:
+            return JsonResponse({"success": False, "error": str(exc)}, status=409)
+        except (OSError, UnicodeError):
+            return JsonResponse(
+                {"success": False, "error": "Unable to update the managed rule."},
+                status=500,
+            )
 
-            with open(file_path, "w") as f:
-                f.writelines(new_lines)
-
-            return JsonResponse({"success": True, "enabled": enable})
-
-        except Exception as e:
-            import traceback
-
-            traceback.print_exc()
-            return JsonResponse({"success": False, "error": str(e)})
-
-
-@method_decorator(csrf_exempt, name="dispatch")
-class UpdateSingleCRSRuleView(LoginRequiredMixin, View):
+class UpdateSingleCRSRuleView(AuditedMutationMixin, LoginRequiredMixin, View):
+    audit_action = "crs.rule.update"
     login_url = "wafinstaller:login"
 
     def post(self, request, filename):
         try:
             body = json.loads(request.body)
-            new_rule = body.get("content", "").strip()
+            new_rule = body.get("content", "")
+            if not isinstance(new_rule, str):
+                raise ManagedFileError("Rule content must be a string.")
+            new_rule = new_rule.strip()
             rule_id_match = re.search(
                 r"\bid\s*:\s*[\"']?(\d+)[\"']?", new_rule, re.IGNORECASE
             )
             if not rule_id_match:
-                return JsonResponse(
-                    {"success": False, "error": "Rule ID not found in new content."}
-                )
+                raise ManagedFileError("Rule ID not found in new content.")
             rule_id = rule_id_match.group(1)
+            file_path = _rule_file(filename, allowed_suffixes=(".conf",))
+            lines = file_path.read_text(encoding="utf-8").splitlines(keepends=True)
 
-            version = get_crs_full_version()
-            rule_dir = get_rules_dir(version)
-            file_path = os.path.join(rule_dir, filename)
-            if not os.path.isfile(file_path):
-                return JsonResponse({"success": False, "error": "File not found."})
-
-            with open(file_path, "r") as f:
-                lines = f.readlines()
-
-            new_lines = []
-            i = 0
-            found = False
-            while i < len(lines):
-                line = lines[i]
+            new_lines, index, found = [], 0, False
+            while index < len(lines):
+                line = lines[index]
                 if line.lstrip().startswith(("SecRule", "SecAction")):
                     rule_lines = [line]
-                    i += 1
-                    while i < len(lines):
-                        current_line = lines[i]
+                    index += 1
+                    while index < len(lines):
+                        current_line = lines[index]
                         rule_lines.append(current_line)
-                        i += 1
+                        index += 1
                         if (
                             not current_line.lstrip().startswith('"')
                             and not current_line.strip().startswith("#")
-                            and current_line.strip() != ""
+                            and current_line.strip()
                         ):
                             break
                     full_rule = "".join(rule_lines)
-                    if (
-                        f"id:{rule_id}" in full_rule
-                        or f"id:{rule_id}," in full_rule
-                        or f'id:{rule_id}"' in full_rule
-                        or f"id: {rule_id}" in full_rule
-                    ):
+                    current_id = re.search(
+                        r"\bid\s*:\s*[\"']?(\d+)[\"']?",
+                        full_rule,
+                        re.IGNORECASE,
+                    )
+                    if current_id and current_id.group(1) == rule_id:
                         new_lines.append(new_rule + "\n")
                         found = True
                     else:
                         new_lines.extend(rule_lines)
                 else:
                     new_lines.append(line)
-                    i += 1
+                    index += 1
 
             if not found:
                 return JsonResponse(
-                    {"success": False, "error": f"Rule ID {rule_id} not found in file."}
+                    {
+                        "success": False,
+                        "error": f"Rule ID {rule_id} not found in file.",
+                    },
+                    status=404,
                 )
-
-            with open(file_path, "w") as f:
-                f.writelines(new_lines)
-
-            return JsonResponse({"success": True})
-        except Exception as e:
-            import traceback
-
-            traceback.print_exc()
-            return JsonResponse({"success": False, "error": str(e)})
-
+            changed = _deploy_text(file_path, "".join(new_lines))
+            return JsonResponse({"success": True, "changed": changed})
+        except (json.JSONDecodeError, ManagedFileError) as exc:
+            return JsonResponse({"success": False, "error": str(exc)}, status=400)
+        except DeploymentError as exc:
+            return JsonResponse({"success": False, "error": str(exc)}, status=409)
+        except (OSError, UnicodeError):
+            return JsonResponse(
+                {"success": False, "error": "Unable to update the managed rule."},
+                status=500,
+            )
 
 # -------------------------
 # Server network/traffic
@@ -806,20 +878,27 @@ class CrsVersionListView(LoginRequiredMixin, View):
         )
 
 
-class CrsSwitchVersionView(LoginRequiredMixin, View):
+class CrsSwitchVersionView(AuditedMutationMixin, LoginRequiredMixin, View):
+    audit_action = "crs.version.switch"
     login_url = "wafinstaller:login"
 
     def post(self, request):
-        version = request.POST.get("version")
-        if not version:
-            messages.error(request, "Invalid version tag.")
+        version = normalize_version(request.POST.get("version"))
+        known_versions = {
+            normalize_version(tag)
+            for tag in CrsVersion.objects.values_list("tag", flat=True)
+        }
+        if not version or version not in known_versions:
+            mark_audit_failure(request)
+            messages.error(request, "Select a valid version from the CRS catalog.")
             return redirect("wafinstaller:crs_version")
 
-        exit_code, stderr = run_switch_version_script(version)
+        exit_code, _stderr = run_switch_version_script(version)
         if exit_code == 0:
             messages.success(request, f"CRS successfully switched to {version}.")
         else:
-            messages.error(request, f"Switch failed: {stderr}")
+            mark_audit_failure(request)
+            messages.error(request, "CRS switch failed; review the server logs.")
         return redirect("wafinstaller:crs_version")
 
 
@@ -827,7 +906,8 @@ class CrsSwitchVersionView(LoginRequiredMixin, View):
 # ModSecurity settings
 # -------------------------
 
-class ModSecuritySettingsView(LoginRequiredMixin, View):
+class ModSecuritySettingsView(AuditedMutationMixin, LoginRequiredMixin, View):
+    audit_action = "modsecurity.settings.update"
     template_name = "dashboard/panel/waf_settings.html"
     login_url = "wafinstaller:login"
 
@@ -835,55 +915,61 @@ class ModSecuritySettingsView(LoginRequiredMixin, View):
         paths = get_paths()
         settings_map = {}
         try:
-            with open(paths.modsec_conf, "r") as f:
-                content = f.read()
-                for key in MODSEC_KEYS:
-                    match = re.search(
-                        rf"^\s*{re.escape(key)}\s+(.+)", content, re.MULTILINE
-                    )
-                    value = match.group(1).strip() if match else ""
-                    description = MODSEC_KEY_DESCRIPTIONS.get(key, "")
-                    settings_map[key] = {"value": value, "description": description}
-        except Exception as e:
-            messages.error(request, f"Error reading ModSecurity config: {e}")
-
+            content = Path(paths.modsec_conf).read_text(encoding="utf-8")
+            for key in MODSEC_KEYS:
+                match = re.search(
+                    rf"^\s*{re.escape(key)}\s+(.+)", content, re.MULTILINE
+                )
+                settings_map[key] = {
+                    "value": match.group(1).strip() if match else "",
+                    "description": MODSEC_KEY_DESCRIPTIONS.get(key, ""),
+                }
+        except (OSError, UnicodeError):
+            messages.error(request, "Unable to read the ModSecurity configuration.")
         return render(request, self.template_name, {"settings": settings_map})
 
     def post(self, request):
         paths = get_paths()
         try:
-            with open(paths.modsec_conf, "r") as f:
-                lines = f.readlines()
+            config_path = Path(paths.modsec_conf).resolve(strict=True)
+            lines = config_path.read_text(encoding="utf-8").splitlines(keepends=True)
+            values = {}
+            for key in MODSEC_KEYS:
+                value = request.POST.get(key, "").strip()
+                if not value or len(value) > 1024 or any(c in value for c in "\r\n\x00"):
+                    raise ManagedFileError(f"Invalid value for {key}.")
+                values[key] = value
 
             updated_lines = []
             for line in lines:
-                updated = False
-                for key in MODSEC_KEYS:
+                replacement = None
+                for key, value in values.items():
                     if line.strip().startswith(key):
-                        new_value = request.POST.get(key, "").strip()
-                        updated_lines.append(f"{key} {new_value}\n")
-                        updated = True
+                        replacement = f"{key} {value}\n"
                         break
-                if not updated:
-                    updated_lines.append(line)
+                updated_lines.append(replacement if replacement is not None else line)
 
-            with open(paths.modsec_conf, "w") as f:
-                f.writelines(updated_lines)
-
-            try:
-                subprocess.run(paths.test_cmd, check=True)
-                subprocess.run(paths.reload_cmd, check=True)
-                messages.success(
-                    request, "WAF settings updated and web server reloaded."
-                )
-            except subprocess.CalledProcessError:
-                messages.warning(
-                    request,
-                    "Settings saved, but failed to reload the web server. Reload manually.",
-                )
-        except Exception as e:
-            messages.error(request, f"Failed to update modsecurity.conf: {e}")
-
+            changed = deploy_managed_text(
+                config_path,
+                "".join(updated_lines),
+                test_cmd=paths.test_cmd,
+                reload_cmd=paths.reload_cmd,
+            )
+            messages.success(
+                request,
+                "ModSecurity settings updated and reloaded."
+                if changed
+                else "No ModSecurity configuration change was required.",
+            )
+        except ManagedFileError as exc:
+            mark_audit_failure(request)
+            messages.error(request, str(exc))
+        except DeploymentError as exc:
+            mark_audit_failure(request)
+            messages.error(request, str(exc))
+        except (OSError, UnicodeError):
+            mark_audit_failure(request)
+            messages.error(request, "Unable to update the ModSecurity configuration.")
         return redirect("wafinstaller:crs_settings")
 
 
@@ -895,48 +981,43 @@ class CustomRulesView(LoginRequiredMixin, View):
     login_url = "wafinstaller:login"
 
     def get(self, request):
-        actions = ["deny", "pass", "allow", "drop", "log", "nolog"]
-        version = get_crs_full_version()
-        if not version:
-            messages.error(request, "Installed CRS version could not be detected.")
-            return render(
-                request,
-                "dashboard/panel/custom_rules_list.html",
-                {"rules": [], "version": None, "actions": actions},
-            )
-
-        path = _custom_after_path(version)
+        actions = sorted(_ALLOWED_RULE_ACTIONS)
         rules = []
+        version = None
         try:
-            with open(path, "r") as f:
-                for line in f:
-                    line = line.strip()
-                    if line.startswith("SecRule"):
-                        match = RULE_PATTERN.match(line)
-                        if match:
-                            rule = {
-                                "variable": match.group(1),
-                                "operator": match.group(2),
-                                "id": match.group(3),
-                                "phase": match.group(4),
-                                "action": match.group(5),
-                                "comment": match.group(6) if match.lastindex >= 6 else "",
-                            }
-                            if "severity:" in line:
-                                rule["severity"] = self._extract_value(line, "severity")
-                            if "tag:" in line:
-                                tags = self._extract_all_values(line, "tag")
-                                rule["tag"] = ",".join(tags)
-                            if "t:" in line:
-                                transforms = self._extract_all_values(line, "t")
-                                rule["transformations"] = ",".join(transforms)
-                            if "ver:" in line:
-                                rule["ver"] = self._extract_value(line, "ver")
-                            if "capture" in line:
-                                rule["capture"] = True
-                            rules.append(rule)
-        except Exception as e:
-            messages.error(request, f"Error reading custom rules: {e}")
+            path, version = _active_custom_rule_file(request.GET.get("version"))
+            for line in path.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if not line.startswith("SecRule"):
+                    continue
+                match = RULE_PATTERN.match(line)
+                if not match:
+                    continue
+                rule = {
+                    "variable": match.group(1),
+                    "operator": match.group(2),
+                    "id": match.group(3),
+                    "phase": match.group(4),
+                    "action": match.group(5),
+                    "comment": match.group(6) if match.lastindex >= 6 else "",
+                }
+                if "severity:" in line:
+                    rule["severity"] = self._extract_value(line, "severity")
+                if "tag:" in line:
+                    rule["tag"] = ",".join(self._extract_all_values(line, "tag"))
+                if "t:" in line:
+                    rule["transformations"] = ",".join(
+                        self._extract_all_values(line, "t")
+                    )
+                if "ver:" in line:
+                    rule["ver"] = self._extract_value(line, "ver")
+                if "capture" in line:
+                    rule["capture"] = True
+                rules.append(rule)
+        except ManagedFileError as exc:
+            messages.error(request, str(exc))
+        except (OSError, UnicodeError):
+            messages.error(request, "Unable to read the managed custom-rule file.")
 
         return render(
             request,
@@ -945,208 +1026,116 @@ class CustomRulesView(LoginRequiredMixin, View):
         )
 
     def _extract_value(self, text, key):
-        m = re.search(rf"{key}:(?:'([^']+)'|([^,\\\"]+))", text)
-        if m:
-            return (m.group(1) or m.group(2)).strip()
-        return ""
+        match = re.search(rf"{key}:(?:'([^']+)'|([^,\"]+))", text)
+        return (match.group(1) or match.group(2)).strip() if match else ""
 
     def _extract_all_values(self, text, key):
-        matches = re.findall(rf"{key}:(?:'([^']+)'|([^,\\\"]+))", text)
-        return [(m[0] or m[1]).strip() for m in matches]
+        matches = re.findall(rf"{key}:(?:'([^']+)'|([^,\"]+))", text)
+        return [(match[0] or match[1]).strip() for match in matches]
 
 
-class AddCustomRuleView(LoginRequiredMixin, View):
+class AddCustomRuleView(AuditedMutationMixin, LoginRequiredMixin, View):
+    audit_action = "custom_rule.add"
     login_url = "wafinstaller:login"
 
     def get(self, request):
-        version = request.GET.get("version") or get_crs_full_version()
+        version = normalize_version(get_crs_full_version())
         return render(
             request, "dashboard/panel/custom_rule_add.html", {"version": version}
         )
 
     def post(self, request):
-        version = request.POST.get("version") or get_crs_full_version()
-        path = _custom_after_path(version)
-
-        rule_id = request.POST.get("id")
-        phase = request.POST.get("phase")
-        action = request.POST.get("action")
-        variable = request.POST.get("variable")
-        operator = request.POST.get("operator")
-        comment = request.POST.get("comment")
-        severity = request.POST.get("severity")
-        transformations = request.POST.get("transformations", "")
-        tag = request.POST.get("tag", "")
-        ver = request.POST.get("ver", "OWASP_CRS/4.17.0-dev")
-        capture = request.POST.get("capture")
-
-        actions = [f"id:{rule_id}", f"phase:{phase}", action]
-        if capture:
-            actions.append("capture")
-        if comment:
-            actions.append(f"msg:'{comment}'")
-        if severity:
-            actions.append(f"severity:{severity}")
-        if tag:
-            for t in tag.split(","):
-                t = t.strip()
-                if t:
-                    actions.append(f"tag:'{t}'")
-        if ver:
-            actions.append(f"ver:'{ver}'")
-        if transformations:
-            for t in transformations.split(","):
-                t_clean = t.strip()
-                if t_clean.startswith("t:"):
-                    t_clean = t_clean[2:]
-                if t_clean:
-                    actions.append(f"t:{t_clean}")
-
-        rule_line = f'SecRule {variable} "{operator}" "{",".join(actions)}"\n'
-
-        paths = get_paths()
+        version = normalize_version(get_crs_full_version())
         try:
-            with open(path, "a") as f:
-                f.write(rule_line)
-            subprocess.run(paths.test_cmd, check=True)
-            subprocess.run(paths.reload_cmd, check=True)
-            messages.success(
-                request, "Custom rule added and web server reloaded successfully."
-            )
-        except subprocess.CalledProcessError as e:
-            messages.warning(request, f"Rule saved but failed to reload server: {e}")
-        except Exception as e:
-            messages.error(request, f"Failed to add rule: {e}")
+            path, version = _active_custom_rule_file(request.POST.get("version"))
+            rule_id, rule_line = _build_custom_rule(request)
+            current = path.read_text(encoding="utf-8")
+            if re.search(rf"\bid\s*:\s*[\"']?{re.escape(rule_id)}\b", current):
+                raise ManagedFileError(f"Rule ID {rule_id} already exists.")
+            _deploy_text(path, current + rule_line)
+            messages.success(request, "Custom rule added and web server reloaded.")
+        except (ManagedFileError, DeploymentError) as exc:
+            mark_audit_failure(request)
+            messages.error(request, str(exc))
+        except (OSError, UnicodeError):
+            mark_audit_failure(request)
+            messages.error(request, "Unable to add the custom rule.")
+        return redirect(reverse("wafinstaller:custom_rules") + f"?version={version or ''}")
 
-        return redirect(reverse("wafinstaller:custom_rules") + f"?version={version}")
 
-
-class EditCustomRuleView(LoginRequiredMixin, View):
+class EditCustomRuleView(AuditedMutationMixin, LoginRequiredMixin, View):
+    audit_action = "custom_rule.edit"
     login_url = "wafinstaller:login"
 
     def post(self, request, rule_id):
-        version = request.POST.get("version")
-        if not version:
-            messages.error(request, "Missing CRS version.")
-            return redirect("wafinstaller:custom_rules")
-
-        path = _custom_after_path(version)
-
-        new_id = request.POST.get("id")
-        phase = request.POST.get("phase")
-        action = request.POST.get("action")
-        variable = request.POST.get("variable")
-        operator = request.POST.get("operator")
-        comment = request.POST.get("comment")
-        severity = request.POST.get("severity")
-        transformations = request.POST.get("transformations", "")
-        tag = request.POST.get("tag", "")
-        ver = request.POST.get("ver", "OWASP_CRS/4.17.0-dev")
-        capture = request.POST.get("capture")
-
-        updated_lines = []
-        rule_found = False
-        paths = get_paths()
-
+        version = normalize_version(get_crs_full_version())
         try:
-            with open(path, "r") as f:
-                for line in f:
-                    if f"id:{rule_id}" in line:
-                        actions = [f"id:{new_id}", f"phase:{phase}", action]
-                        if capture:
-                            actions.append("capture")
-                        if comment:
-                            actions.append(f"msg:'{comment}'")
-                        if severity:
-                            actions.append(f"severity:{severity}")
-                        if tag:
-                            for t in tag.split(","):
-                                actions.append(f"tag:'{t.strip()}'")
-                        if ver:
-                            actions.append(f"ver:'{ver}'")
-                        if transformations:
-                            for t in transformations.split(","):
-                                t_clean = t.strip()
-                                if t_clean.startswith("t:"):
-                                    t_clean = t_clean[2:]
-                                if t_clean:
-                                    actions.append(f"t:{t_clean}")
-                        new_rule = (
-                            f'SecRule {variable} "{operator}" "{",".join(actions)}"\n'
-                        )
-                        updated_lines.append(new_rule)
-                        rule_found = True
-                    else:
-                        updated_lines.append(line)
-
-            if not rule_found:
-                messages.error(request, f"Rule ID {rule_id} not found.")
-                return redirect("wafinstaller:custom_rules")
-
-            with open(path, "w") as f:
-                f.writelines(updated_lines)
-
-            subprocess.run(paths.test_cmd, check=True)
-            subprocess.run(paths.reload_cmd, check=True)
-            messages.success(
-                request, f"Rule {rule_id} updated and web server reloaded successfully."
-            )
-        except subprocess.CalledProcessError as e:
-            messages.warning(request, f"Rule updated but reload failed: {e}")
-        except Exception as e:
-            messages.error(request, f"Failed to update rule: {e}")
-
-        return redirect(reverse("wafinstaller:custom_rules") + f"?version={version}")
-
-
-class DeleteCustomRuleView(LoginRequiredMixin, View):
-    login_url = "wafinstaller:login"
-
-    def post(self, request, rule_id):
-        version = request.POST.get("version")
-        if not version:
-            messages.error(request, "CRS version is missing.")
-            return redirect("wafinstaller:custom_rules")
-
-        path = _custom_after_path(version)
-        updated_lines = []
-        rule_found = False
-        paths = get_paths()
-
-        try:
-            with open(path, "r") as f:
-                for line in f:
-                    if f"id:{rule_id}" in line:
-                        rule_found = True
-                        continue
+            if not str(rule_id).isdigit():
+                raise ManagedFileError("A numeric rule ID is required.")
+            path, version = _active_custom_rule_file(request.POST.get("version"))
+            new_id, new_rule = _build_custom_rule(request)
+            lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
+            updated_lines, found = [], False
+            for line in lines:
+                current = re.search(r"\bid\s*:\s*[\"']?(\d+)", line)
+                if current and current.group(1) == str(rule_id):
+                    updated_lines.append(new_rule)
+                    found = True
+                else:
                     updated_lines.append(line)
+            if not found:
+                raise ManagedFileError(f"Rule ID {rule_id} was not found.")
+            if new_id != str(rule_id) and re.search(
+                rf"\bid\s*:\s*[\"']?{re.escape(new_id)}\b",
+                "".join(lines),
+            ):
+                raise ManagedFileError(f"Rule ID {new_id} already exists.")
+            _deploy_text(path, "".join(updated_lines))
+            messages.success(request, f"Rule {rule_id} updated and reloaded.")
+        except (ManagedFileError, DeploymentError) as exc:
+            mark_audit_failure(request)
+            messages.error(request, str(exc))
+        except (OSError, UnicodeError):
+            mark_audit_failure(request)
+            messages.error(request, "Unable to update the custom rule.")
+        return redirect(reverse("wafinstaller:custom_rules") + f"?version={version or ''}")
 
-            if not rule_found:
-                messages.warning(
-                    request, f"Rule ID {rule_id} not found. Nothing deleted."
-                )
-            else:
-                with open(path, "w") as f:
-                    f.writelines(updated_lines)
-                subprocess.run(paths.test_cmd, check=True)
-                subprocess.run(paths.reload_cmd, check=True)
-                messages.success(
-                    request, f"Rule {rule_id} deleted and web server reloaded successfully."
-                )
 
-        except subprocess.CalledProcessError as e:
-            messages.warning(request, f"Rule deleted but reload failed: {e}")
-        except Exception as e:
-            messages.error(request, f"Error deleting rule: {e}")
+class DeleteCustomRuleView(AuditedMutationMixin, LoginRequiredMixin, View):
+    audit_action = "custom_rule.delete"
+    login_url = "wafinstaller:login"
 
-        return redirect(reverse("wafinstaller:custom_rules") + f"?version={version}")
+    def post(self, request, rule_id):
+        version = normalize_version(get_crs_full_version())
+        try:
+            path, version = _active_custom_rule_file(request.POST.get("version"))
+            lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
+            updated_lines, found = [], False
+            for line in lines:
+                current = re.search(r"\bid\s*:\s*[\"']?(\d+)", line)
+                if current and current.group(1) == str(rule_id):
+                    found = True
+                    continue
+                updated_lines.append(line)
+            if not found:
+                raise ManagedFileError(f"Rule ID {rule_id} was not found.")
+            _deploy_text(path, "".join(updated_lines))
+            messages.success(request, f"Rule {rule_id} deleted and reloaded.")
+        except (ManagedFileError, DeploymentError) as exc:
+            mark_audit_failure(request)
+            messages.error(request, str(exc))
+        except (OSError, UnicodeError):
+            mark_audit_failure(request)
+            messages.error(request, "Unable to delete the custom rule.")
+        return redirect(reverse("wafinstaller:custom_rules") + f"?version={version or ''}")
 
 
 # -------------------------
 # App settings (WafControl)
 # -------------------------
 
-class AppSettingsView(LoginRequiredMixin, View):
+class AppSettingsView(AuditedMutationMixin, LoginRequiredMixin, View):
+    audit_action = "application.settings.update"
     template_name = "dashboard/panel/app_settings.html"
     login_url = "wafinstaller:login"
 
@@ -1162,14 +1151,17 @@ class AppSettingsView(LoginRequiredMixin, View):
 
     def post(self, request):
         try:
-            app_settings = {
-                key: request.POST.get(key, APP_KEYS[key]["default"]).strip()
-                for key in APP_KEYS
-            }
-            save_app_settings(app_settings)
+            retention = request.POST.get("AttackRetentionDays", "").strip()
+            if not retention.isdigit() or not 1 <= int(retention) <= 3650:
+                raise ValueError("Attack retention must be between 1 and 3650 days.")
+            save_app_settings({"AttackRetentionDays": retention})
             messages.success(request, "Application settings saved successfully.")
-        except Exception as e:
-            messages.error(request, f"Error saving settings: {e}")
+        except (AttributeError, ValueError) as exc:
+            mark_audit_failure(request)
+            messages.error(request, str(exc))
+        except Exception:
+            mark_audit_failure(request)
+            messages.error(request, "Unable to save application settings.")
         return redirect("wafinstaller:app_settings")
 
 
@@ -1177,7 +1169,10 @@ class AppSettingsView(LoginRequiredMixin, View):
 # Admin profile (2FA)
 # -------------------------
 
-class AdminProfileView(LoginRequiredMixin, View):
+class AdminProfileView(AuditedMutationMixin, LoginRequiredMixin, View):
+    audit_action = "admin.profile.update"
+    login_url = "wafinstaller:login"
+
     def get(self, request):
         profile_form = AdminProfileForm(instance=request.user)
         password_form = AdminPasswordForm(user=request.user)
@@ -1219,6 +1214,9 @@ class AdminProfileView(LoginRequiredMixin, View):
                 profile_form.save()
                 messages.success(request, "Profile updated successfully.")
                 return redirect("/dashboard/profile/?tab=personal-information")
+            mark_audit_failure(request)
+            messages.error(request, "Profile validation failed.")
+            return redirect("/dashboard/profile/?tab=personal-information")
 
         elif "change_password" in request.POST:
             password_form = AdminPasswordForm(user=user, data=request.POST)
@@ -1228,6 +1226,7 @@ class AdminProfileView(LoginRequiredMixin, View):
                 messages.success(request, "Password changed successfully.")
                 return redirect("/dashboard/profile/?tab=change-password")
             else:
+                mark_audit_failure(request)
                 messages.error(request, "Password change failed.")
                 return redirect("/dashboard/profile/?tab=change-password")
 
@@ -1245,6 +1244,7 @@ class AdminProfileView(LoginRequiredMixin, View):
                 profile.save()
                 messages.success(request, "Two-Factor Authentication enabled.")
             else:
+                mark_audit_failure(request)
                 messages.error(request, "Invalid verification code.")
             return redirect("/dashboard/profile/?tab=two-factor")
 
@@ -1257,9 +1257,12 @@ class AdminProfileView(LoginRequiredMixin, View):
                 profile.save()
                 messages.success(request, "Two-Factor Authentication disabled.")
             else:
+                mark_audit_failure(request)
                 messages.error(request, "Invalid 2FA code. Deactivation failed.")
             return redirect("/dashboard/profile/?tab=two-factor")
 
+        mark_audit_failure(request)
+        messages.error(request, "Unknown profile operation.")
         return redirect("/dashboard/profile/")
 
 
@@ -1267,13 +1270,17 @@ class AdminProfileView(LoginRequiredMixin, View):
 # Force-fetch CRS versions
 # -------------------------
 
-class ForceFetchCrsVersionsView(LoginRequiredMixin, View):
+class ForceFetchCrsVersionsView(AuditedMutationMixin, LoginRequiredMixin, View):
+    audit_action = "crs.catalog.refresh"
     login_url = "wafinstaller:login"
 
     def post(self, request):
         try:
-            fetch_crs_versions_task()
+            versions = fetch_crs_versions_task()
+            if not versions:
+                raise RuntimeError("No stable release was returned.")
             messages.success(request, "Successfully fetched the latest CRS versions.")
-        except Exception as e:
-            messages.error(request, f"Failed to fetch CRS versions: {e}")
+        except Exception:
+            mark_audit_failure(request)
+            messages.error(request, "Unable to refresh the CRS release catalog.")
         return redirect("wafinstaller:crs_version")
