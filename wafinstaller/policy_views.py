@@ -8,6 +8,7 @@ from django.contrib import messages
 from django.contrib.auth.mixins import LoginRequiredMixin
 from django.db import transaction
 from django.db.models import Q
+from django.db.models.deletion import ProtectedError
 from django.shortcuts import get_object_or_404, redirect
 from django.utils import timezone
 from django.views import View
@@ -18,7 +19,11 @@ from wafinstaller.helper.adapters import get_paths
 from wafinstaller.models import (
     AddressEntry,
     AddressList,
+    Application,
     Attack,
+    ConfigRevision,
+    Policy,
+    PolicyBinding,
     PolicyRevision,
     RuleExclusion,
 )
@@ -26,6 +31,7 @@ from wafinstaller.policy import (
     PolicyBundle,
     PolicyDeploymentError,
     deploy_policy_bundle,
+    effective_policy_snapshot,
     include_directives,
     include_status,
     policy_diff,
@@ -34,6 +40,9 @@ from wafinstaller.policy import (
 from wafinstaller.policy_forms import (
     AddressEntryForm,
     AddressListForm,
+    ApplicationForm,
+    PolicyBindingForm,
+    PolicyForm,
     RuleExclusionForm,
 )
 
@@ -111,6 +120,11 @@ class PolicyManagementView(LoginRequiredMixin, TemplateView):
         expiring_entries = AddressEntry.objects.filter(
             enabled=True, expires_at__gt=moment, expires_at__lte=expiry_deadline
         )
+        bindings = list(
+            PolicyBinding.objects.select_related("application", "policy").all()
+        )
+        for binding in bindings:
+            binding.resolved_config = binding.effective_config()
         for exclusion in exclusions:
             exclusion.impact_count = self._impact_count(exclusion)
         context.update(
@@ -119,6 +133,14 @@ class PolicyManagementView(LoginRequiredMixin, TemplateView):
                 "exclusions": exclusions,
                 "address_list_form": AddressListForm(),
                 "address_entry_form": AddressEntryForm(),
+                "applications": Application.objects.select_related(
+                    "policy_binding__policy"
+                ).all(),
+                "policies": Policy.objects.select_related("parent").all(),
+                "bindings": bindings,
+                "application_form": ApplicationForm(),
+                "policy_form": PolicyForm(),
+                "binding_form": PolicyBindingForm(),
                 "exclusion_form": RuleExclusionForm(
                     instance=edit_exclusion, initial=initial
                 ),
@@ -129,7 +151,7 @@ class PolicyManagementView(LoginRequiredMixin, TemplateView):
                 "include_directives": include_directives(),
                 "edit_exclusion": edit_exclusion,
                 "revisions": PolicyRevision.objects.select_related(
-                    "created_by", "approved_by"
+                    "created_by", "approved_by", "config_revision"
                 )[:20],
                 "separate_approver": settings.WAFCONTROL_REQUIRE_SEPARATE_APPROVER,
                 "now": moment,
@@ -198,6 +220,9 @@ class PolicyObjectMutationView(AuditedMutationMixin, LoginRequiredMixin, View):
         "address-list": AddressList,
         "address-entry": AddressEntry,
         "rule-exclusion": RuleExclusion,
+        "application": Application,
+        "policy": Policy,
+        "policy-binding": PolicyBinding,
     }
 
     def post(self, request, object_type, object_id, operation):
@@ -210,8 +235,16 @@ class PolicyObjectMutationView(AuditedMutationMixin, LoginRequiredMixin, View):
         instance = get_object_or_404(model, pk=object_id)
         if operation == "delete":
             label = str(instance)
-            instance.delete()
-            messages.success(request, f"{label} deleted.")
+            try:
+                instance.delete()
+            except ProtectedError:
+                mark_audit_failure(request)
+                messages.error(
+                    request,
+                    f"{label} is still referenced and cannot be deleted.",
+                )
+            else:
+                messages.success(request, f"{label} deleted.")
         elif operation == "clone" and isinstance(instance, RuleExclusion):
             source_id = instance.pk
             instance.pk = None
@@ -307,6 +340,15 @@ class PolicyRevisionCreateView(AuditedMutationMixin, LoginRequiredMixin, View):
     audit_action = "policy.revision.create"
 
     def post(self, request):
+        snapshot = effective_policy_snapshot()
+        config_checksum = ConfigRevision.checksum_for(snapshot)
+        config_revision, _ = ConfigRevision.objects.get_or_create(
+            checksum=config_checksum,
+            defaults={
+                "snapshot": snapshot,
+                "created_by": request.user,
+            },
+        )
         bundle = render_policy()
         checksum = sha256(
             (bundle.before + "\0" + bundle.after).encode("utf-8")
@@ -317,14 +359,22 @@ class PolicyRevisionCreateView(AuditedMutationMixin, LoginRequiredMixin, View):
                 "before_content": bundle.before,
                 "after_content": bundle.after,
                 "created_by": request.user,
+                "config_revision": config_revision,
                 "summary": {
                     "active_exclusions": bundle.active_exclusions,
                     "active_address_entries": bundle.active_address_entries,
                     "warnings": list(bundle.warnings),
+                    "active_applications": bundle.active_applications,
+                    "config_checksum": config_checksum,
                 },
             },
         )
         state = "created" if created else "already exists"
+        if revision.config_revision_id is None:
+            PolicyRevision.objects.filter(
+                pk=revision.pk, config_revision__isnull=True
+            ).update(config_revision=config_revision)
+            revision.config_revision = config_revision
         messages.success(
             request, f"Candidate revision {revision.checksum[:12]} {state}."
         )
@@ -371,6 +421,7 @@ class PolicyRevisionMutationView(AuditedMutationMixin, LoginRequiredMixin, View)
             after=revision.after_content,
             active_exclusions=revision.summary.get("active_exclusions", 0),
             active_address_entries=revision.summary.get("active_address_entries", 0),
+            active_applications=revision.summary.get("active_applications", 0),
             warnings=tuple(revision.summary.get("warnings", [])),
         )
         paths = get_paths()
@@ -399,3 +450,39 @@ class PolicyRevisionMutationView(AuditedMutationMixin, LoginRequiredMixin, View)
             else "Approved revision was already active."
         )
         messages.success(request, message)
+
+
+class ManagedConfigurationCreateView(AuditedMutationMixin, LoginRequiredMixin, View):
+    login_url = "wafinstaller:login"
+    form_class = None
+    object_label = "Configuration object"
+
+    def post(self, request):
+        form = self.form_class(request.POST)
+        if form.is_valid():
+            instance = form.save(commit=False)
+            instance.created_by = request.user
+            instance.save()
+            messages.success(request, f"{self.object_label} {instance} created.")
+        else:
+            mark_audit_failure(request)
+            _report_form_errors(request, form)
+        return redirect("wafinstaller:policy_management")
+
+
+class ApplicationCreateView(ManagedConfigurationCreateView):
+    audit_action = "policy.application.create"
+    form_class = ApplicationForm
+    object_label = "Application"
+
+
+class WafPolicyCreateView(ManagedConfigurationCreateView):
+    audit_action = "policy.policy.create"
+    form_class = PolicyForm
+    object_label = "Policy"
+
+
+class PolicyBindingCreateView(ManagedConfigurationCreateView):
+    audit_action = "policy.binding.create"
+    form_class = PolicyBindingForm
+    object_label = "Policy binding"

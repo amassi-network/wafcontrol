@@ -3,6 +3,8 @@ from django.urls import path
 from wafinstaller.policy_views import (
     AddressEntryCreateView,
     AddressListCreateView,
+    ApplicationCreateView,
+    PolicyBindingCreateView,
     PolicyDeployView,
     PolicyManagementView,
     PolicyObjectMutationView,
@@ -10,6 +12,7 @@ from wafinstaller.policy_views import (
     PolicyRevisionMutationView,
     RuleExclusionCreateView,
     RuleExclusionUpdateView,
+    WafPolicyCreateView,
 )
 from wafinstaller.views import (
     AddCustomRuleView,
@@ -131,6 +134,21 @@ urlpatterns = [
         name="edit_custom_rule",
     ),
     # Managed policies
+    path(
+        "dashboard/policies/applications/create/",
+        ApplicationCreateView.as_view(),
+        name="application_create",
+    ),
+    path(
+        "dashboard/policies/policy-definitions/create/",
+        WafPolicyCreateView.as_view(),
+        name="waf_policy_create",
+    ),
+    path(
+        "dashboard/policies/bindings/create/",
+        PolicyBindingCreateView.as_view(),
+        name="policy_binding_create",
+    ),
     path(
         "dashboard/policies/", PolicyManagementView.as_view(), name="policy_management"
     ),

@@ -2,7 +2,15 @@ from typing import ClassVar
 
 from django import forms
 
-from wafinstaller.models import AddressEntry, AddressList, RuleExclusion, TriageDecision
+from wafinstaller.models import (
+    AddressEntry,
+    AddressList,
+    Application,
+    Policy,
+    PolicyBinding,
+    RuleExclusion,
+    TriageDecision,
+)
 
 
 class StyledModelForm(forms.ModelForm):
@@ -74,5 +82,42 @@ class TriageDecisionForm(StyledModelForm):
         widgets: ClassVar[dict] = {
             "notes": forms.Textarea(
                 attrs={"rows": 2, "placeholder": "Reasoning, evidence or follow-up"}
+            )
+        }
+
+
+class ApplicationForm(StyledModelForm):
+    class Meta:
+        model = Application
+        fields = ("name", "hostname", "description", "enabled")
+        widgets: ClassVar[dict] = {"description": forms.Textarea(attrs={"rows": 2})}
+
+
+class PolicyForm(StyledModelForm):
+    class Meta:
+        model = Policy
+        fields = (
+            "name",
+            "description",
+            "parent",
+            "engine_mode",
+            "paranoia_level",
+            "inbound_threshold",
+            "outbound_threshold",
+            "enabled",
+        )
+        widgets: ClassVar[dict] = {"description": forms.Textarea(attrs={"rows": 2})}
+
+
+class PolicyBindingForm(StyledModelForm):
+    class Meta:
+        model = PolicyBinding
+        fields = ("application", "policy", "overrides", "enabled")
+        widgets: ClassVar[dict] = {
+            "overrides": forms.Textarea(
+                attrs={
+                    "rows": 3,
+                    "placeholder": '{"paranoia_level": 2, "inbound_threshold": 7}',
+                }
             )
         }

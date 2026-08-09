@@ -10,6 +10,68 @@
     {% endfor %}
 
     <div class="row">
+      <div class="col-lg-4"><div class="iq-card h-100">
+        <div class="iq-card-header"><h5 class="card-title">Register an application</h5></div>
+        <div class="iq-card-body"><p class="text-muted">One exact hostname identifies the protected application.</p>
+          <form method="post" action="{% url 'wafinstaller:application_create' %}">{% csrf_token %}{{ application_form.as_p }}<button class="btn btn-primary">Create application</button></form>
+        </div>
+      </div></div>
+      <div class="col-lg-4"><div class="iq-card h-100">
+        <div class="iq-card-header"><h5 class="card-title">Define a reusable policy</h5></div>
+        <div class="iq-card-body"><p class="text-muted">Blank values inherit from the parent, then safe defaults.</p>
+          <form method="post" action="{% url 'wafinstaller:waf_policy_create' %}">{% csrf_token %}{{ policy_form.as_p }}<button class="btn btn-primary">Create policy</button></form>
+        </div>
+      </div></div>
+      <div class="col-lg-4"><div class="iq-card h-100">
+        <div class="iq-card-header"><h5 class="card-title">Bind policy to application</h5></div>
+        <div class="iq-card-body"><p class="text-muted">Optional JSON overrides are validated and remain visible.</p>
+          <form method="post" action="{% url 'wafinstaller:policy_binding_create' %}">{% csrf_token %}{{ binding_form.as_p }}<button class="btn btn-primary">Create binding</button></form>
+        </div>
+      </div></div>
+    </div>
+
+    <div class="iq-card">
+      <div class="iq-card-header"><h5 class="card-title">Applications and effective policies</h5></div>
+      <div class="iq-card-body table-responsive">
+        <table class="table table-sm">
+          <thead><tr><th>Application</th><th>Policy</th><th>Effective configuration</th><th>Status</th><th>Actions</th></tr></thead>
+          <tbody>
+          {% for binding in bindings %}
+            <tr>
+              <td>{{ binding.application.name }}<br><code>{{ binding.application.hostname }}</code></td>
+              <td>{{ binding.policy.name }}{% if binding.policy.parent %}<br><small>inherits {{ binding.policy.parent.name }}</small>{% endif %}</td>
+              <td><code>{{ binding.resolved_config.engine_mode }}</code> · PL {{ binding.resolved_config.paranoia_level }} · thresholds {{ binding.resolved_config.inbound_threshold }}/{{ binding.resolved_config.outbound_threshold }}{% if binding.overrides %}<br><small>Overrides: <code>{{ binding.overrides }}</code></small>{% endif %}</td>
+              <td>{% if binding.enabled and binding.application.enabled and binding.policy.enabled %}<span class="badge badge-success">Active</span>{% else %}<span class="badge badge-secondary">Inactive</span>{% endif %}</td>
+              <td class="d-flex">
+                <form method="post" action="{% url 'wafinstaller:policy_object_mutation' 'policy-binding' binding.id 'toggle' %}" class="mr-2">{% csrf_token %}<button class="btn btn-sm btn-outline-primary">Toggle</button></form>
+                <form method="post" action="{% url 'wafinstaller:policy_object_mutation' 'policy-binding' binding.id 'delete' %}">{% csrf_token %}<button class="btn btn-sm btn-outline-danger">Delete</button></form>
+              </td>
+            </tr>
+          {% empty %}<tr><td colspan="5" class="text-muted">No application has an assigned policy yet.</td></tr>{% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="row">
+      <div class="col-lg-6"><div class="iq-card"><div class="iq-card-header"><h5 class="card-title">Applications</h5></div><div class="iq-card-body table-responsive">
+        <table class="table table-sm"><thead><tr><th>Name</th><th>Hostname</th><th>Status</th><th>Actions</th></tr></thead><tbody>
+        {% for application in applications %}<tr><td>{{ application.name }}</td><td><code>{{ application.hostname }}</code></td><td>{% if application.enabled %}Enabled{% else %}Disabled{% endif %}</td><td class="d-flex">
+          <form method="post" action="{% url 'wafinstaller:policy_object_mutation' 'application' application.id 'toggle' %}" class="mr-2">{% csrf_token %}<button class="btn btn-sm btn-outline-primary">Toggle</button></form>
+          <form method="post" action="{% url 'wafinstaller:policy_object_mutation' 'application' application.id 'delete' %}">{% csrf_token %}<button class="btn btn-sm btn-outline-danger">Delete</button></form>
+        </td></tr>{% empty %}<tr><td colspan="4" class="text-muted">No application.</td></tr>{% endfor %}
+        </tbody></table>
+      </div></div></div>
+      <div class="col-lg-6"><div class="iq-card"><div class="iq-card-header"><h5 class="card-title">Reusable policies</h5></div><div class="iq-card-body table-responsive">
+        <table class="table table-sm"><thead><tr><th>Name</th><th>Parent</th><th>Values</th><th>Status</th><th>Actions</th></tr></thead><tbody>
+        {% for policy in policies %}<tr><td>{{ policy.name }}</td><td>{{ policy.parent|default:"-" }}</td><td>{{ policy.get_engine_mode_display|default:"Inherited" }} · PL {{ policy.paranoia_level|default:"inherited" }} · {{ policy.inbound_threshold|default:"inherited" }}/{{ policy.outbound_threshold|default:"inherited" }}</td><td>{% if policy.enabled %}Enabled{% else %}Disabled{% endif %}</td><td class="d-flex">
+          <form method="post" action="{% url 'wafinstaller:policy_object_mutation' 'policy' policy.id 'toggle' %}" class="mr-2">{% csrf_token %}<button class="btn btn-sm btn-outline-primary">Toggle</button></form>
+          <form method="post" action="{% url 'wafinstaller:policy_object_mutation' 'policy' policy.id 'delete' %}">{% csrf_token %}<button class="btn btn-sm btn-outline-danger">Delete</button></form>
+        </td></tr>{% empty %}<tr><td colspan="5" class="text-muted">No policy.</td></tr>{% endfor %}
+        </tbody></table>
+      </div></div></div>
+    </div>
+    <div class="row">
       <div class="col-12">
         <div class="iq-card">
           <div class="iq-card-header">
@@ -31,7 +93,8 @@
             {% endfor %}
             <div class="d-flex flex-wrap">
               <span class="badge badge-primary mr-2">{{ policy_bundle.active_exclusions }} active exclusions</span>
-              <span class="badge badge-secondary">{{ policy_bundle.active_address_entries }} active address entries</span>
+              <span class="badge badge-secondary mr-2">{{ policy_bundle.active_address_entries }} active address entries</span>
+              <span class="badge badge-info">{{ policy_bundle.active_applications }} active applications</span>
             </div>
             {% if expiring_exclusions or expiring_entries %}
               <div class="alert alert-warning mt-3">
@@ -225,7 +288,7 @@
             <tbody>
             {% for revision in revisions %}
               <tr>
-                <td><code>{{ revision.checksum|slice:":12" }}</code></td>
+                <td><code>{{ revision.checksum|slice:":12" }}</code>{% if revision.config_revision %}<br><small>config <code>{{ revision.config_revision.checksum|slice:":12" }}</code></small>{% endif %}</td>
                 <td>{{ revision.created_at }} by {{ revision.created_by|default:"system" }}</td>
                 <td><span class="badge badge-secondary">{{ revision.get_status_display }}</span>{% if revision.deployment_error %}<br><small class="text-danger">{{ revision.deployment_error }}</small>{% endif %}</td>
                 <td>{{ revision.approved_by|default:"-" }}</td>

@@ -16,8 +16,12 @@ from wafinstaller.attacks import attack_apache, attack_nginx
 from wafinstaller.models import (
     AddressEntry,
     AddressList,
+    Application,
     Attack,
     AuditEntry,
+    ConfigRevision,
+    Policy,
+    PolicyBinding,
     PolicyRevision,
     RuleExclusion,
     TriageDecision,
@@ -28,6 +32,7 @@ from wafinstaller.policy import (
     PolicyBundle,
     PolicyDeploymentError,
     deploy_policy_bundle,
+    effective_policy_snapshot,
     render_policy,
 )
 from wafinstaller.tasks import expire_managed_policy_objects
@@ -576,3 +581,131 @@ class StaticFilesConfigurationTests(SimpleTestCase):
         self.assertFalse(collection_directory.is_relative_to(source_directory))
         self.assertIsNotNone(finders.find("dashboard/css/style.css"))
         self.assertIsNotNone(finders.find("dashboard/js/jquery.min.js"))
+
+
+class ApplicationPolicyMilestoneTests(TestCase):
+    def setUp(self):
+        self.user = get_user_model().objects.create_user(
+            username="application-policy-admin",
+            password="test-password",
+            is_staff=True,
+            is_superuser=True,
+        )
+
+    def _binding(self):
+        parent = Policy.objects.create(
+            name="observe-baseline",
+            engine_mode=Policy.EngineMode.DETECTION_ONLY,
+            paranoia_level=2,
+            inbound_threshold=7,
+            outbound_threshold=4,
+        )
+        child = Policy.objects.create(
+            name="ironitia-web",
+            parent=parent,
+            outbound_threshold=6,
+        )
+        application = Application.objects.create(
+            name="Ironitia",
+            hostname="ironitia.com",
+        )
+        binding = PolicyBinding(
+            application=application,
+            policy=child,
+            overrides={"paranoia_level": 3},
+        )
+        binding.full_clean()
+        binding.save()
+        return parent, child, application, binding
+
+    def test_policy_inheritance_and_binding_overrides_are_resolved(self):
+        _parent, child, _application, binding = self._binding()
+
+        self.assertEqual(
+            child.effective_config(),
+            {
+                "engine_mode": Policy.EngineMode.DETECTION_ONLY,
+                "paranoia_level": 2,
+                "inbound_threshold": 7,
+                "outbound_threshold": 6,
+            },
+        )
+        self.assertEqual(binding.effective_config()["paranoia_level"], 3)
+
+    def test_policy_cycle_and_invalid_override_are_rejected(self):
+        parent, child, _application, binding = self._binding()
+        parent.parent = child
+        with self.assertRaises(ValidationError):
+            parent.full_clean()
+
+        binding.overrides = {"paranoia_level": "invalid"}
+        with self.assertRaises(ValidationError):
+            binding.full_clean()
+
+        binding.overrides = {"paranoia_level": 8}
+        with self.assertRaises(ValidationError):
+            binding.full_clean()
+
+    def test_application_policy_is_rendered_before_crs(self):
+        self._binding()
+
+        bundle = render_policy()
+
+        self.assertEqual(bundle.active_applications, 1)
+        self.assertIn("Application: Ironitia", bundle.before)
+        self.assertIn("@streq ironitia.com", bundle.before)
+        self.assertIn("ctl:ruleEngine=DetectionOnly", bundle.before)
+        self.assertIn("setvar:tx.paranoia_level=3", bundle.before)
+        self.assertIn("setvar:tx.inbound_anomaly_score_threshold=7", bundle.before)
+        self.assertIn("setvar:tx.outbound_anomaly_score_threshold=6", bundle.before)
+
+    def test_configuration_snapshot_and_revision_are_immutable(self):
+        self._binding()
+        snapshot = effective_policy_snapshot()
+        config = ConfigRevision.objects.create(
+            checksum=ConfigRevision.checksum_for(snapshot),
+            snapshot=snapshot,
+            created_by=self.user,
+        )
+        config.snapshot = {"schema": 999}
+        with self.assertRaises(ValidationError):
+            config.save()
+
+    def test_candidate_links_frozen_configuration_snapshot(self):
+        self._binding()
+        self.client.force_login(self.user)
+
+        response = self.client.post(reverse("wafinstaller:policy_revision_create"))
+
+        self.assertRedirects(response, reverse("wafinstaller:policy_management"))
+        revision = PolicyRevision.objects.get()
+        self.assertIsNotNone(revision.config_revision)
+        self.assertEqual(revision.summary["active_applications"], 1)
+        self.assertEqual(
+            revision.summary["config_checksum"],
+            revision.config_revision.checksum,
+        )
+
+    @patch("wafinstaller.policy_views.include_status", return_value=False)
+    def test_policy_management_renders_effective_configuration(self, _include_status):
+        self._binding()
+        self.client.force_login(self.user)
+
+        response = self.client.get(reverse("wafinstaller:policy_management"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Applications and effective policies")
+        self.assertContains(response, "Detection only")
+        self.assertContains(response, "thresholds 7/6")
+
+    def test_new_mutation_routes_require_csrf(self):
+        client = Client(enforce_csrf_checks=True)
+        client.force_login(self.user)
+        for route_name in (
+            "wafinstaller:application_create",
+            "wafinstaller:waf_policy_create",
+            "wafinstaller:policy_binding_create",
+        ):
+            with self.subTest(route_name=route_name):
+                response = client.post(reverse(route_name))
+                self.assertEqual(response.status_code, 403)

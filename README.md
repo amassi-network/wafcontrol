@@ -106,6 +106,24 @@ regenerates the policy, validates the live Nginx/ModSecurity configuration and
 reloads it. A failed validation restores the database state. The dashboard also
 shows objects and owners due to expire within seven days.
 
+
+
+### Applications and reusable policies
+
+The **Managed Policies** page can register protected applications by exact
+hostname and bind each one to a reusable policy. Policies control the
+ModSecurity engine mode (Off, DetectionOnly, or On), paranoia level, and
+inbound/outbound anomaly thresholds.
+
+A policy may inherit from another policy. Blank values inherit; explicit
+per-application JSON overrides take precedence and are strictly validated.
+The dashboard always displays the resolved configuration. Only enabled
+applications, policies, and bindings are rendered into the before-CRS file.
+
+Saving a policy candidate also freezes a canonical ConfigRevision snapshot.
+Its checksum and link to the immutable rendered PolicyRevision make the
+application-to-policy state auditable alongside the exact ModSecurity content.
+
 ### Static asset collection
 
 Dashboard sources live in `frontend/static`; collected files are written to

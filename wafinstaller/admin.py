@@ -3,7 +3,11 @@ from django.contrib import admin
 from wafinstaller.models import (
     AddressEntry,
     AddressList,
+    Application,
     AuditEntry,
+    ConfigRevision,
+    Policy,
+    PolicyBinding,
     PolicyRevision,
     RuleExclusion,
     TriageDecision,
@@ -102,4 +106,29 @@ class PolicyRevisionAdmin(ReadOnlyPolicyAdmin):
         "deployed_at",
     )
     list_filter = ("status", "created_at")
+    search_fields = ("checksum",)
+
+
+@admin.register(Application)
+class ApplicationAdmin(ReadOnlyPolicyAdmin):
+    list_display = ("name", "hostname", "enabled", "created_by", "updated_at")
+    list_filter = ("enabled",)
+    search_fields = ("name", "hostname")
+
+
+@admin.register(Policy)
+class WafPolicyAdmin(ReadOnlyPolicyAdmin):
+    list_display = ("name", "parent", "engine_mode", "paranoia_level", "enabled")
+    list_filter = ("engine_mode", "paranoia_level", "enabled")
+
+
+@admin.register(PolicyBinding)
+class PolicyBindingAdmin(ReadOnlyPolicyAdmin):
+    list_display = ("application", "policy", "enabled", "created_by", "updated_at")
+    list_filter = ("enabled", "policy")
+
+
+@admin.register(ConfigRevision)
+class ConfigRevisionAdmin(ReadOnlyPolicyAdmin):
+    list_display = ("checksum", "created_by", "created_at")
     search_fields = ("checksum",)

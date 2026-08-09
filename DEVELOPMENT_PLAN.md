@@ -67,11 +67,15 @@ pass.
 Verification completed on 9 August 2026: 43 Django tests, Django system checks,
 migration drift detection, Python syntax checks, and Git whitespace checks pass.
 
-## Milestone 4 — Applications and policies
+## Milestone 4 — Applications and policies (completed)
 
 - add Application, Policy, PolicyBinding, and immutable ConfigRevision objects;
 - configure Off, DetectionOnly, or On, paranoia level, and thresholds per application;
 - add policy inheritance, readable overrides, and regression fixtures.
+
+Verification completed on 9 August 2026: 51 Django tests, Django system checks,
+clean migration execution, migration drift detection, Ruff checks, and Git
+whitespace checks pass.
 
 ## Milestone 5 — Multi-node control plane
 

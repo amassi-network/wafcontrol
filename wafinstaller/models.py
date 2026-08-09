@@ -1,4 +1,5 @@
 import ipaddress
+import json
 import re
 from hashlib import sha256
 from typing import ClassVar
@@ -372,6 +373,13 @@ class PolicyRevision(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
     approved_at = models.DateTimeField(null=True, blank=True)
     deployed_at = models.DateTimeField(null=True, blank=True)
+    config_revision = models.OneToOneField(
+        "ConfigRevision",
+        null=True,
+        blank=True,
+        on_delete=models.PROTECT,
+        related_name="policy_revision",
+    )
     deployment_error = models.CharField(max_length=1000, blank=True)
 
     class Meta:
@@ -388,7 +396,13 @@ class PolicyRevision(models.Model):
         if self.pk:
             original = (
                 type(self)
-                .objects.only("checksum", "before_content", "after_content", "summary")
+                .objects.only(
+                    "checksum",
+                    "before_content",
+                    "after_content",
+                    "summary",
+                    "config_revision_id",
+                )
                 .get(pk=self.pk)
             )
             if (
@@ -396,9 +410,235 @@ class PolicyRevision(models.Model):
                 or original.before_content != self.before_content
                 or original.after_content != self.after_content
                 or original.summary != self.summary
+                or original.config_revision_id != self.config_revision_id
             ):
                 raise ValidationError("Policy revision content is immutable.")
         super().save(*args, **kwargs)
 
     def __str__(self):
         return f"{self.checksum[:12]} ({self.get_status_display()})"
+
+
+class Application(models.Model):
+    name = models.CharField(max_length=120, unique=True)
+    hostname = models.CharField(max_length=253, unique=True)
+    description = models.CharField(max_length=500, blank=True)
+    enabled = models.BooleanField(default=True)
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="created_waf_applications",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ("name",)
+
+    def clean(self):
+        super().clean()
+        self.hostname = self.hostname.lower().rstrip(".")
+        if not re.fullmatch(
+            r"(?=.{1,253}$)(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)*[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?",
+            self.hostname,
+        ):
+            raise ValidationError({"hostname": "Enter one exact DNS hostname."})
+
+    def __str__(self):
+        return f"{self.name} ({self.hostname})"
+
+
+class Policy(models.Model):
+    class EngineMode(models.TextChoices):
+        OFF = "off", "Off"
+        DETECTION_ONLY = "detection_only", "Detection only"
+        ON = "on", "On"
+
+    name = models.CharField(max_length=120, unique=True)
+    description = models.CharField(max_length=500, blank=True)
+    parent = models.ForeignKey(
+        "self",
+        null=True,
+        blank=True,
+        on_delete=models.PROTECT,
+        related_name="children",
+    )
+    engine_mode = models.CharField(
+        max_length=20, choices=EngineMode.choices, blank=True
+    )
+    paranoia_level = models.PositiveSmallIntegerField(null=True, blank=True)
+    inbound_threshold = models.PositiveIntegerField(null=True, blank=True)
+    outbound_threshold = models.PositiveIntegerField(null=True, blank=True)
+    enabled = models.BooleanField(default=True)
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="created_waf_policies",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ("name",)
+        verbose_name_plural = "policies"
+
+    def clean(self):
+        super().clean()
+        errors = {}
+        if self.paranoia_level is not None and not 1 <= self.paranoia_level <= 4:
+            errors["paranoia_level"] = "Paranoia level must be between 1 and 4."
+        for field_name in ("inbound_threshold", "outbound_threshold"):
+            value = getattr(self, field_name)
+            if value is not None and not 1 <= value <= 1000:
+                errors[field_name] = "Threshold must be between 1 and 1000."
+        ancestor = self.parent
+        visited = {self.pk} if self.pk else set()
+        while ancestor is not None:
+            if ancestor.pk in visited:
+                errors["parent"] = "Policy inheritance cannot contain a cycle."
+                break
+            visited.add(ancestor.pk)
+            ancestor = ancestor.parent
+        if errors:
+            raise ValidationError(errors)
+
+    def effective_config(self):
+        config = {
+            "engine_mode": self.EngineMode.ON,
+            "paranoia_level": 1,
+            "inbound_threshold": 5,
+            "outbound_threshold": 4,
+        }
+        chain = []
+        current = self
+        visited = set()
+        while current is not None:
+            if current.pk and current.pk in visited:
+                raise ValidationError("Policy inheritance contains a cycle.")
+            if current.pk:
+                visited.add(current.pk)
+            chain.append(current)
+            current = current.parent
+        for item in reversed(chain):
+            for field_name in config:
+                value = getattr(item, field_name)
+                if value not in (None, ""):
+                    config[field_name] = value
+        return config
+
+    def __str__(self):
+        return self.name
+
+
+class PolicyBinding(models.Model):
+    OVERRIDE_KEYS: ClassVar[set[str]] = {
+        "engine_mode",
+        "paranoia_level",
+        "inbound_threshold",
+        "outbound_threshold",
+    }
+
+    application = models.OneToOneField(
+        Application, on_delete=models.CASCADE, related_name="policy_binding"
+    )
+    policy = models.ForeignKey(
+        Policy, on_delete=models.PROTECT, related_name="bindings"
+    )
+    overrides = models.JSONField(default=dict, blank=True)
+    enabled = models.BooleanField(default=True)
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="created_waf_policy_bindings",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ("application__name",)
+
+    def clean(self):
+        super().clean()
+        if not isinstance(self.overrides, dict):
+            raise ValidationError({"overrides": "Overrides must be a JSON object."})
+        unknown = set(self.overrides) - self.OVERRIDE_KEYS
+        if unknown:
+            raise ValidationError(
+                {
+                    "overrides": f"Unsupported override keys: {', '.join(sorted(unknown))}."
+                }
+            )
+        config = self.effective_config()
+        if config["engine_mode"] not in Policy.EngineMode.values:
+            raise ValidationError({"overrides": "Invalid engine_mode override."})
+        try:
+            paranoia_level = int(config["paranoia_level"])
+            thresholds = [
+                int(config["inbound_threshold"]),
+                int(config["outbound_threshold"]),
+            ]
+        except (TypeError, ValueError) as exc:
+            raise ValidationError(
+                {"overrides": "Override values must use the expected data types."}
+            ) from exc
+        if not 1 <= paranoia_level <= 4:
+            raise ValidationError(
+                {"overrides": "Paranoia level must be between 1 and 4."}
+            )
+        if any(not 1 <= value <= 1000 for value in thresholds):
+            raise ValidationError(
+                {"overrides": "Thresholds must be between 1 and 1000."}
+            )
+
+    def effective_config(self):
+        config = self.policy.effective_config()
+        config.update(
+            {
+                key: value
+                for key, value in self.overrides.items()
+                if value not in (None, "")
+            }
+        )
+        return config
+
+    def __str__(self):
+        return f"{self.application.name} → {self.policy.name}"
+
+
+class ConfigRevision(models.Model):
+    checksum = models.CharField(max_length=64, unique=True)
+    snapshot = models.JSONField()
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="created_waf_config_revisions",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ("-created_at", "-id")
+
+    @staticmethod
+    def checksum_for(snapshot):
+        canonical = json.dumps(snapshot, sort_keys=True, separators=(",", ":"))
+        return sha256(canonical.encode("utf-8")).hexdigest()
+
+    def save(self, *args, **kwargs):
+        if self.checksum != self.checksum_for(self.snapshot):
+            raise ValidationError("Configuration revision checksum does not match.")
+        if self.pk:
+            original = type(self).objects.get(pk=self.pk)
+            if original.checksum != self.checksum or original.snapshot != self.snapshot:
+                raise ValidationError("Configuration revision is immutable.")
+        super().save(*args, **kwargs)
+
+    def __str__(self):
+        return self.checksum[:12]

@@ -11,7 +11,12 @@ from django.conf import settings
 from django.utils import timezone
 
 from wafinstaller.helper.adapters import get_paths
-from wafinstaller.models import AddressList, RuleExclusion
+from wafinstaller.models import (
+    AddressList,
+    Policy,
+    PolicyBinding,
+    RuleExclusion,
+)
 
 BEFORE_FILENAME = "REQUEST-890-WAFCONTROL-BEFORE.conf"
 AFTER_FILENAME = "RESPONSE-990-WAFCONTROL-AFTER.conf"
@@ -28,6 +33,7 @@ class PolicyBundle:
     active_exclusions: int
     active_address_entries: int
     warnings: tuple[str, ...]
+    active_applications: int = 0
 
 
 def _header(position: str) -> list[str]:
@@ -133,9 +139,71 @@ def _render_scoped_exclusion(exclusion: RuleExclusion) -> list[str]:
     return lines
 
 
+def effective_policy_snapshot(bindings=None):
+    if bindings is None:
+        bindings = PolicyBinding.objects.select_related(
+            "application", "policy", "policy__parent"
+        ).all()
+    applications = []
+    for binding in bindings:
+        if (
+            not binding.enabled
+            or not binding.application.enabled
+            or not binding.policy.enabled
+        ):
+            continue
+        applications.append(
+            {
+                "application_id": binding.application_id,
+                "name": binding.application.name,
+                "hostname": binding.application.hostname,
+                "policy_id": binding.policy_id,
+                "policy": binding.policy.name,
+                "overrides": binding.overrides,
+                "effective": binding.effective_config(),
+            }
+        )
+    applications.sort(key=lambda item: (item["hostname"], item["application_id"]))
+    return {"schema": 1, "applications": applications}
+
+
+def _render_application_policies(bindings) -> tuple[list[str], int]:
+    lines = []
+    active_count = 0
+    engine_actions = {
+        Policy.EngineMode.OFF: "Off",
+        Policy.EngineMode.DETECTION_ONLY: "DetectionOnly",
+        Policy.EngineMode.ON: "On",
+    }
+    for item in effective_policy_snapshot(bindings)["applications"]:
+        active_count += 1
+        config = item["effective"]
+        rule_id = 1_800_000 + item["application_id"]
+        if rule_id > 1_899_999:
+            raise PolicyDeploymentError("Application identifier range is exhausted.")
+        actions = [
+            f"id:{rule_id}",
+            "phase:1",
+            "pass",
+            "nolog",
+            f"ctl:ruleEngine={engine_actions[config['engine_mode']]}",
+            f"setvar:tx.paranoia_level={int(config['paranoia_level'])}",
+            f"setvar:tx.inbound_anomaly_score_threshold={int(config['inbound_threshold'])}",
+            f"setvar:tx.outbound_anomaly_score_threshold={int(config['outbound_threshold'])}",
+        ]
+        lines.extend(
+            [
+                f"# Application: {item['name']}; policy={item['policy']}; host={item['hostname']}\n",
+                f'SecRule REQUEST_HEADERS:Host "@streq {item["hostname"]}" "{",".join(actions)}"\n\n',
+            ]
+        )
+    return lines, active_count
+
+
 def render_policy(
     *,
     exclusions: Iterable[RuleExclusion] | None = None,
+    bindings: Iterable[PolicyBinding] | None = None,
     address_lists: Iterable[AddressList] | None = None,
     moment=None,
 ) -> PolicyBundle:
@@ -144,12 +212,18 @@ def render_policy(
         exclusions = RuleExclusion.objects.all()
     if address_lists is None:
         address_lists = AddressList.objects.prefetch_related("entries").all()
+    if bindings is None:
+        bindings = PolicyBinding.objects.select_related(
+            "application", "policy", "policy__parent"
+        ).all()
 
     before = _header("before CRS")
     after = _header("after CRS")
     address_lines, address_count, warnings = _render_address_lists(
         address_lists, moment
     )
+    application_lines, application_count = _render_application_policies(bindings)
+    before.extend(application_lines)
     before.extend(address_lines)
 
     active_exclusions = 0
@@ -182,6 +256,7 @@ def render_policy(
         after="".join(after),
         active_exclusions=active_exclusions,
         active_address_entries=address_count,
+        active_applications=application_count,
         warnings=tuple(warnings),
     )
 
