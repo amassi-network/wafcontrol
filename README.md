@@ -56,6 +56,40 @@ python manage.py showmigrations wafinstaller
 Do not use `--fake` for later migrations. Review the migration plan and keep a
 database backup before every upgrade.
 
+### Managed exclusions and address lists
+
+The **Managed Policies** page stores exclusions and named address lists in the
+database, renders dedicated files before and after CRS, shows a deployment diff,
+and requires explicit approval before a rule exclusion becomes active.
+
+The semantics are deliberately distinct:
+
+- **Trusted** remains inspected by the WAF and is reserved for future
+  Fail2ban/CrowdSec allow-list export;
+- **WAF bypass** disables inspection and produces a prominent warning;
+- **Block** returns HTTP 403;
+- **Observe** logs the matching source without blocking it.
+
+On an Nginx installation, wire the managed files into ModSecurity once:
+
+~~~bash
+sudo WAFCONTROL_SERVICE_USER=wafcontrol ./scripts/install_managed_policy.sh /etc/nginx/modsec/wafcontrol
+~~~
+
+The installer places the before-file immediately before the active CRS rules
+include and the after-file immediately after it. It runs nginx -t, reloads
+Nginx, and restores the previous main.conf if validation or reload fails.
+
+Set the same directory in the application environment:
+
+~~~dotenv
+WAFCONTROL_POLICY_DIR=/etc/nginx/modsec/wafcontrol
+~~~
+
+The application service account needs write access only to this managed
+directory. It does not need write access to OWASP CRS source files.
+
+
 
 
 ## WAFControl Features

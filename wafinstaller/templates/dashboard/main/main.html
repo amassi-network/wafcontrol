@@ -149,6 +149,14 @@
                     </li>
 
 
+                    <!-- Managed policies -->
+                    <li class="{% if request.resolver_match.url_name == 'policy_management' %}active{% endif %}">
+                        <a href="{% url 'wafinstaller:policy_management' %}" class="iq-waves-effect">
+                            <i class="las la-list-alt iq-arrow-left"></i><span>Managed Policies</span>
+                        </a>
+                    </li>
+
+
                     <!-- Owc Setting -->
                     <li class="{% if request.resolver_match.url_name == 'app_settings' %}active{% endif %}">
                         <a href="{% url 'wafinstaller:app_settings' %}" class="iq-waves-effect">

@@ -35,13 +35,31 @@ checks, migration drift detection, clean-database migrations, legacy
 whitespace checks all pass.
 
 
-## Milestone 3 — Managed exclusions and address lists
+## Milestone 3A — Managed exclusions and address lists (completed)
 
-- add `RuleExclusion`, `AddressList`, and `AddressEntry` models;
-- generate WAFControl-owned before/after CRS files without editing vendor CRS;
-- support host, URI, method, variable, rule ID/tag, source, rationale, owner, and expiry scopes;
-- distinguish Trusted, WAF bypass, Block, and Observe semantics;
-- add event-to-exclusion assistance, impact preview, diff, approval, validation, and rollback.
+- versioned `RuleExclusion`, `AddressList`, and `AddressEntry` models;
+- explicit Draft/Approved workflow for CRS exclusions;
+- scopes by host, exact/prefix URI, method, variable, rule ID or rule tag;
+- source, rationale, owner, start date, expiry and enabled state;
+- explicit Trusted, WAF bypass, Block, and Observe semantics;
+- event-to-draft assistance and historical impact count for rule IDs;
+- WAFControl-owned before/after CRS rendering without vendor-file edits;
+- candidate diff, configuration validation, atomic two-file deployment and rollback;
+- idempotent Nginx include installer with rollback.
+
+Verification completed on 9 August 2026: 38 Django tests, Django system checks,
+clean 0002 to 0003 migration, migration drift detection, full Ruff checks on
+the touched Python modules, shell syntax checks, and Git whitespace checks all
+pass.
+
+## Milestone 3B — Triage and policy revision workflow
+
+- classify events as attack, false positive, authorised traffic, known scanner or unknown;
+- extract the precise matched variable from normalized ModSecurity events;
+- preview both affected and suspicious historical events;
+- add immutable policy revisions and a two-person approval option;
+- schedule automatic expiry and notify owners before exceptions expire;
+- add edit/clone operations and regression fixtures executed against ModSecurity.
 
 ## Milestone 4 — Applications and policies
 

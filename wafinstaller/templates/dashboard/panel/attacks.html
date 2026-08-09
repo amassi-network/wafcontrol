@@ -161,6 +161,10 @@
                                                                     </div>
                                                                 </div>
                                                                 <div class="modal-footer">
+                                                                    <a class="btn btn-primary"
+                                                                       href="{% url 'wafinstaller:policy_management' %}?attack={{ attack.id }}">
+                                                                        Propose exclusion
+                                                                    </a>
                                                                     <button type="button" class="btn btn-light"
                                                                             onclick="navigator.clipboard.writeText(`{{ attack.uri }}`)">
                                                                         Copy URI
