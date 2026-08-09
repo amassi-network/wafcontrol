@@ -4,7 +4,9 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import call, patch
 
+from django.conf import settings
 from django.contrib.auth import get_user_model
+from django.contrib.staticfiles import finders
 from django.core.exceptions import ValidationError
 from django.test import Client, SimpleTestCase, TestCase, override_settings
 from django.urls import reverse
@@ -563,3 +565,14 @@ ModSecurity: Warning. Matched Data: select found within ARGS:description [id "94
                     backend.extract_all(backend.TAGS_RE, raw), ["attack-sqli"]
                 )
                 self.assertEqual(backend.extract_first(backend.UID_RE, raw), "tx-123")
+
+
+class StaticFilesConfigurationTests(SimpleTestCase):
+    def test_static_sources_are_separate_from_collection_target(self):
+        source_directory = Path(settings.STATICFILES_DIRS[0]).resolve()
+        collection_directory = Path(settings.STATIC_ROOT).resolve()
+
+        self.assertNotEqual(source_directory, collection_directory)
+        self.assertFalse(collection_directory.is_relative_to(source_directory))
+        self.assertIsNotNone(finders.find("dashboard/css/style.css"))
+        self.assertIsNotNone(finders.find("dashboard/js/jquery.min.js"))

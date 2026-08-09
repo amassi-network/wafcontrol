@@ -106,6 +106,13 @@ regenerates the policy, validates the live Nginx/ModSecurity configuration and
 reloads it. A failed validation restores the database state. The dashboard also
 shows objects and owners due to expire within seven days.
 
+### Static asset collection
+
+Dashboard sources live in `frontend/static`; collected files are written to
+`staticfiles`. These directories must remain distinct. Nginx should serve
+`/static/` from `/opt/WafControl/staticfiles/`. It is safe to run
+`python manage.py collectstatic --clear --noinput` only with this layout.
+
 
 
 

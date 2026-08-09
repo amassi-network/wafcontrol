@@ -142,12 +142,12 @@ USE_TZ = True
 # https://docs.djangoproject.com/en/5.2/howto/static-files/
 
 STATICFILES_DIRS = [
-    BASE_DIR / "frontend",
+    BASE_DIR / "frontend" / "static",
 ]
 
 # js, css, img files
 STATIC_URL = "/static/"
-STATIC_ROOT = "frontend/static"
+STATIC_ROOT = BASE_DIR / "staticfiles"
 
 # User uploaded files
 MEDIA_URL = "/media/"
