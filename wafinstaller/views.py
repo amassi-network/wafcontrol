@@ -10,6 +10,7 @@ import matplotlib.pyplot as plt
 import pyotp
 import qrcode
 from celery.result import AsyncResult
+from packaging.version import Version
 from django.contrib import messages
 from django.contrib.auth import get_user_model, login, update_session_auth_hash
 from django.contrib.auth.decorators import login_required
@@ -41,7 +42,10 @@ from .forms import AdminLogin, AdminPasswordForm, AdminProfileForm
 from wafinstaller.helper.helpers import (
     get_installed_crs_version,
     get_latest_crs_version,
+    get_crs_version_status,
+    is_crs_update_available,
     normalize_version,
+    parse_crs_version,
     run_basic_script,
     run_switch_version_script,
     run_updatecrs_script,
@@ -188,7 +192,6 @@ def install_status(request, task_id):
 # Dashboard
 # -------------------------
 
-@method_decorator(csrf_exempt, name="dispatch")
 class DashboardView(LoginRequiredMixin, TemplateView):
     template_name = "dashboard/panel/panel.html"
     login_url = "wafinstaller:login"
@@ -207,6 +210,7 @@ class DashboardView(LoginRequiredMixin, TemplateView):
 
         installed_crs = get_installed_crs_version()
         latest_crs = get_latest_crs_version()
+        crs_version_status = get_crs_version_status(installed_crs, latest_crs)
 
         context.update(
             {
@@ -215,9 +219,10 @@ class DashboardView(LoginRequiredMixin, TemplateView):
                 "waf": waf_data,
                 "installed_crs": installed_crs,
                 "latest_crs": latest_crs,
-                "update_available": bool(
-                    installed_crs and latest_crs and installed_crs != latest_crs
+                "update_available": is_crs_update_available(
+                    installed_crs, latest_crs
                 ),
+                "crs_version_status": crs_version_status,
                 "active_server": service_data.get("server", "none"),
             }
         )
@@ -398,7 +403,6 @@ class CriticalWafAttacksView(LoginRequiredMixin, ListView):
 # CRS update (sync)
 # -------------------------
 
-@method_decorator(csrf_exempt, name="dispatch")
 class CrsUpdateSyncView(LoginRequiredMixin, View):
     login_url = "wafinstaller:login"
 
@@ -774,7 +778,11 @@ class CrsVersionListView(LoginRequiredMixin, View):
     login_url = "wafinstaller:login"
 
     def get(self, request):
-        versions = CrsVersion.objects.order_by("-published_at")
+        versions = list(CrsVersion.objects.all())
+        versions.sort(
+            key=lambda item: parse_crs_version(item.tag) or Version("0"),
+            reverse=True,
+        )
         installed_version = get_installed_crs_version()
         latest_version = get_latest_crs_version()
 
@@ -786,14 +794,18 @@ class CrsVersionListView(LoginRequiredMixin, View):
             "dashboard/panel/crs_versions.html",
             {
                 "versions": versions,
-                "fetched_at": versions.first().fetched_at if versions else "N/A",
+                "fetched_at": max(
+                    (version.fetched_at for version in versions), default="N/A"
+                ),
                 "installed_version": installed_version,
                 "latest_version": latest_version,
+                "version_status": get_crs_version_status(
+                    installed_version, latest_version
+                ),
             },
         )
 
 
-@method_decorator(csrf_exempt, name="dispatch")
 class CrsSwitchVersionView(LoginRequiredMixin, View):
     login_url = "wafinstaller:login"
 
@@ -1255,8 +1267,9 @@ class AdminProfileView(LoginRequiredMixin, View):
 # Force-fetch CRS versions
 # -------------------------
 
-@method_decorator(csrf_exempt, name="dispatch")
-class ForceFetchCrsVersionsView(View):
+class ForceFetchCrsVersionsView(LoginRequiredMixin, View):
+    login_url = "wafinstaller:login"
+
     def post(self, request):
         try:
             fetch_crs_versions_task()

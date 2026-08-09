@@ -23,34 +23,6 @@
                                 <span class="badge badge-info">{{ active_server|default:"none"|title }}</span>
                             </p>
 
-                            <script>
-                                document.getElementById("update-crs-btn")?.addEventListener("click", function () {
-                                    document.getElementById("update-status").style.display = "block";
-                                    document.getElementById("update-log").style.display = "block";
-                                    document.getElementById("update-log").textContent = "";
-
-                                    fetch("{% url 'wafinstaller:dashboard' %}", {
-                                        method: "POST",
-                                        headers: {
-                                            "X-CSRFToken": "{{ csrf_token }}"
-                                        }
-                                    })
-                                        .then(response => response.json())
-                                        .then(data => {
-                                            document.getElementById("update-status").style.display = "none";
-                                            if (data.status === "done") {
-                                                document.getElementById("update-log").textContent = data.log.join("\n");
-                                            } else {
-                                                document.getElementById("update-log").textContent = "Error: " + data.message;
-                                            }
-                                        })
-                                        .catch(err => {
-                                            document.getElementById("update-status").style.display = "none";
-                                            document.getElementById("update-log").textContent = "Unexpected error: " + err;
-                                        });
-                                });
-                            </script>
-
                             {% if waf.exit_code == 0 %}
                                 {% if update_available %}
                                     <div class="alert alert-primary" role="alert">
@@ -66,6 +38,17 @@
                                         </div>
                                         <pre id="update-log" class="mt-2 p-2 bg-light text-dark"
                                              style="display:none; max-height: 300px; overflow-y:auto; font-size: 14px;"></pre>
+                                    </div>
+                                {% elif crs_version_status == "catalog_behind" %}
+                                    <div class="alert alert-warning">
+                                        Active CRS <strong>{{ installed_crs }}</strong> is newer than the latest
+                                        version in the local catalog (<strong>{{ latest_crs }}</strong>).
+                                        Refresh the CRS catalog before attempting an update.
+                                    </div>
+                                {% elif crs_version_status == "unknown" %}
+                                    <div class="alert alert-warning">
+                                        CRS version status is unknown. Refresh the CRS catalog and verify the active
+                                        configuration.
                                     </div>
                                 {% else %}
                                     <div class="alert alert-primary">CRS is up to date.</div>
@@ -438,9 +421,9 @@
                     } else {
                         log.textContent = "Error: " + data.message;
                     }
-                    setTimeout(() => {
-                        window.location.reload();
-                    }, 3000);
+                    if (data.exit_code === 0) {
+                        window.setTimeout(() => window.location.reload(), 1500);
+                    }
                 })
                 .catch(error => {
                     status.style.display = "none";

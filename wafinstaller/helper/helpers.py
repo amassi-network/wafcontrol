@@ -2,9 +2,10 @@ import json
 import subprocess
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Tuple, Optional
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from django.conf import settings
+from packaging.version import InvalidVersion, Version
 
 from wafinstaller.models import CrsVersion
 from wafinstaller.helper.adapters import detect_crs_version
@@ -21,21 +22,74 @@ def parse_datetime(dt_str: str):
 
 
 def normalize_version(version: Optional[str]) -> Optional[str]:
-    """Normalize tags like 'v4.18.0' -> '4.18.0'."""
+    """Return a canonical PEP 440 version for a CRS release tag."""
     if not version:
         return None
-    return version.strip().lstrip("v").strip()
+    value = version.strip()
+    if value[:1].lower() == "v":
+        value = value[1:]
+    try:
+        return str(Version(value))
+    except InvalidVersion:
+        return None
+
+
+def parse_crs_version(version: Optional[str]) -> Optional[Version]:
+    """Parse a CRS tag, accepting values with or without a leading ``v``."""
+    normalized = normalize_version(version)
+    if normalized is None:
+        return None
+    return Version(normalized)
+
+
+def select_latest_crs_version(tags: Iterable[str]) -> Optional[str]:
+    """Select the highest stable CRS version, independently of publish time."""
+    versions = [parsed for tag in tags if (parsed := parse_crs_version(tag))]
+    stable_versions = [
+        version
+        for version in versions
+        if not version.is_prerelease and not version.is_devrelease
+    ]
+    return str(max(stable_versions)) if stable_versions else None
+
+
+def compare_crs_versions(left: Optional[str], right: Optional[str]) -> Optional[int]:
+    """Compare two CRS versions, returning -1, 0, 1, or None if unknown."""
+    left_version = parse_crs_version(left)
+    right_version = parse_crs_version(right)
+    if left_version is None or right_version is None:
+        return None
+    return (left_version > right_version) - (left_version < right_version)
+
+
+def get_crs_version_status(
+    installed: Optional[str], latest: Optional[str]
+) -> str:
+    """Describe the relationship between active and catalog CRS versions."""
+    comparison = compare_crs_versions(installed, latest)
+    if comparison is None:
+        return "unknown"
+    if comparison < 0:
+        return "update_available"
+    if comparison > 0:
+        return "catalog_behind"
+    return "up_to_date"
+
+
+def is_crs_update_available(
+    installed: Optional[str], latest: Optional[str]
+) -> bool:
+    return get_crs_version_status(installed, latest) == "update_available"
 
 
 def get_latest_crs_version() -> Optional[str]:
-    """Return latest CRS version (normalized) from DB or None."""
+    """Return the highest stable CRS version stored in the local catalog."""
     try:
-        latest = CrsVersion.objects.order_by("-published_at").first()
-        if latest:
-            return normalize_version(latest.tag)
+        return select_latest_crs_version(
+            CrsVersion.objects.values_list("tag", flat=True)
+        )
     except Exception:
         return None
-    return None
 
 
 def get_installed_crs_version() -> Optional[str]:

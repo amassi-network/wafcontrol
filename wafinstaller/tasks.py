@@ -332,6 +332,8 @@ def fetch_crs_versions_task():
                 break
             releases = resp.json() or []
             for r in releases:
+                if r.get("draft") or r.get("prerelease"):
+                    continue
                 tag = r.get("tag_name", "")
                 published_at = r.get("published_at", "")
                 zip_url = r.get("zipball_url", "")
@@ -339,11 +341,16 @@ def fetch_crs_versions_task():
                     continue
                 # Parse to aware datetime (UTC)
                 dt = datetime.strptime(published_at, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=pytimezone.utc)
-                CrsVersion.objects.update_or_create(
+                version, _ = CrsVersion.objects.update_or_create(
                     tag=tag,
                     defaults={"published_at": dt, "zip_url": zip_url},
                 )
+                CrsVersion.objects.filter(pk=version.pk).update(
+                    fetched_at=timezone.now()
+                )
                 all_versions.append(tag)
         logger.info("Fetched and saved %d CRS versions.", len(all_versions))
+        return all_versions
     except Exception as e:
         logger.exception("CRS Fetch Error: %s", e)
+        return []
