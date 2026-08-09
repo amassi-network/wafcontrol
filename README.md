@@ -2,6 +2,12 @@
 
 # OWASP WAFControl
 
+> [!NOTE]
+> This fork contains a proposed community evolution plan for safer policy
+> management, CRS exclusions, address lists, application policies, multi-node
+> operation, and security-platform integrations. It is not yet the official
+> OWASP WAFControl roadmap. See [WAFControl Evolution Roadmap](ROADMAP.md).
+
 The **OWASP WAFControl** project provides a web-based dashboard and management interface for ModSecurity and the OWASP Core Rule Set (CRS).  
 It simplifies installation, configuration, and operation of CRS and ModSecurity, enabling administrators and security engineers to deploy, monitor, and manage WAF rules more effectively.
 
