@@ -169,7 +169,7 @@ sudo install -o root -g root -m 0600 \
 sudoedit /opt/WafControl/.env
 ```
 
-Set `SECRET_KEY`, `DB_NAME`, `DB_USER` and `DB_PASS`. Keep
+Set `SECRET_KEY`, `DB_NAME`, `DB_USER` and `DB_PASS`. For YubiKey support, also set `WEBAUTHN_RP_ID` to the dashboard DNS name and `WEBAUTHN_ALLOWED_ORIGINS` to its exact HTTPS origin including port; see `docs/operations/WEBAUTHN_YUBIKEY.md`. Keep
 `DEBUG=False`. The file is loaded directly by Django. It must remain
 root-readable only and must never be committed.
 

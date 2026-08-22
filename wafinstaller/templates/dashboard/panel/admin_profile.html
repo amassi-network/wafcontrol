@@ -1,150 +1,255 @@
 {% extends 'dashboard/main/main.html' %}
 {% load static %}
 {% block content %}
-    {% block title %}Admin Profile - Owasp Wafcontrol{% endblock %}
-
-    <div id="content-page" class="content-page">
-        <div class="container-fluid">
-            {% for message in messages %}
-                <div class="alert alert-{{ message.tags }}">{{ message }}</div>
-            {% endfor %}
-
-            <div class="row">
-                <div class="col-lg-12">
-                    <div class="iq-card">
-                        <div class="iq-card-body p-0">
-                            <div class="iq-edit-list">
-                                <ul class="iq-edit-profile d-flex nav nav-pills">
-                                    <li class="col-md-4 p-0">
-                                        <a class="nav-link" id="tab-personal" data-toggle="pill"
-                                           href="#personal-information">Personal Information</a>
-                                    </li>
-                                    <li class="col-md-4 p-0">
-                                        <a class="nav-link" id="tab-password" data-toggle="pill"
-                                           href="#change-password">Change Password</a>
-                                    </li>
-                                    <li class="col-md-4 p-0">
-                                        <a class="nav-link" id="tab-2fa" data-toggle="pill" href="#two-factor">Two-Factor
-                                            Authentication</a>
-                                    </li>
-                                </ul>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-
-                <div class="col-lg-12">
-                    <div class="iq-edit-list-data">
-                        <div class="tab-content">
-                            <!-- Personal Info -->
-                            <div class="tab-pane fade" id="personal-information" role="tabpanel">
-                                <div class="iq-card">
-                                    <div class="iq-card-header d-flex justify-content-between">
-                                        <div class="iq-header-title">
-                                            <h4 class="card-title">Personal Information</h4>
-                                        </div>
-                                    </div>
-                                    <div class="iq-card-body">
-                                        <form method="post">
-                                            {% csrf_token %}
-                                            {{ profile_form.as_p }}
-                                            <button type="submit" name="update_profile" class="btn btn-primary">Save
-                                            </button>
-                                        </form>
-                                    </div>
-                                </div>
-                            </div>
-
-                            <!-- Change Password -->
-                            <div class="tab-pane fade" id="change-password" role="tabpanel">
-                                <div class="iq-card">
-                                    <div class="iq-card-header d-flex justify-content-between">
-                                        <div class="iq-header-title">
-                                            <h4 class="card-title">Change Password</h4>
-                                        </div>
-                                    </div>
-                                    <div class="iq-card-body">
-                                        <form method="post">
-                                            {% csrf_token %}
-                                            {{ password_form.as_p }}
-                                            <button type="submit" name="change_password" class="btn btn-warning">Update
-                                                Password
-                                            </button>
-                                        </form>
-                                    </div>
-                                </div>
-                            </div>
-
-                            <!-- Two-Factor Auth -->
-                            <div class="tab-pane fade" id="two-factor" role="tabpanel">
-                                <div class="iq-card">
-                                    <div class="iq-card-header d-flex justify-content-between">
-                                        <div class="iq-header-title">
-                                            <h4 class="card-title">Two-Factor Authentication</h4>
-                                        </div>
-                                    </div>
-                                    <div class="iq-card-body">
-                                        {% if user.userprofile.two_factor_enabled %}
-                                            <p class="text-success">2FA is currently <strong>enabled</strong> on your
-                                                account.</p>
-                                            <form method="post">
-                                                {% csrf_token %}
-                                                <div class="form-group">
-                                                    <label for="otp">Enter 6-digit code to disable 2FA:</label>
-                                                    <input type="text" name="otp" class="form-control" required>
-                                                </div>
-                                                <button type="submit" name="disable_2fa" class="btn btn-danger">Disable
-                                                    2FA
-                                                </button>
-                                            </form>
-                                        {% else %}
-
-                                            <p class="text-muted">To enhance your account security, enable Two-Factor
-                                                Authentication (2FA).</p>
-                                            {% if qr_code and secret %}
-                                                <p>Scan this QR code with your authenticator app:</p>
-                                                <img src="data:image/png;base64,{{ qr_code }}" alt="2FA QR Code"
-                                                     class="mb-3" style="max-width: 200px;">
-                                                <p>Or use this secret key: <code>{{ secret }}</code></p>
-                                                <form method="post">
-                                                    {% csrf_token %}
-                                                    <div class="form-group">
-                                                        <label for="otp">Enter the 6-digit code from your app:</label>
-                                                        <input type="text" name="otp" class="form-control" required>
-                                                    </div>
-                                                    <button type="submit" name="enable_2fa" class="btn btn-success">
-                                                        Enable 2FA
-                                                    </button>
-                                                </form>
-                                            {% else %}
-                                                <form method="post">
-                                                    {% csrf_token %}
-                                                    <button type="submit" name="start_2fa" class="btn btn-info">Start
-                                                        2FA Setup
-                                                    </button>
-                                                </form>
-                                            {% endif %}
-                                        {% endif %}
-                                    </div>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-
+{% block title %}Admin Profile - OWASP WAFControl{% endblock %}
+<div id="content-page" class="content-page">
+  <div class="container-fluid">
+    {% for message in messages %}<div class="alert alert-{{ message.tags }}">{{ message }}</div>{% endfor %}
+    <div class="row">
+      <div class="col-lg-12">
+        <div class="iq-card"><div class="iq-card-body p-0"><div class="iq-edit-list">
+          <ul class="iq-edit-profile d-flex nav nav-pills">
+            <li class="col-md-3 p-0"><a class="nav-link" data-toggle="pill" href="#personal-information">Personal Information</a></li>
+            <li class="col-md-3 p-0"><a class="nav-link" data-toggle="pill" href="#change-password">Change Password</a></li>
+            <li class="col-md-3 p-0"><a class="nav-link" data-toggle="pill" href="#two-factor">Authenticator App</a></li>
+            <li class="col-md-3 p-0"><a class="nav-link" data-toggle="pill" href="#yubikey">YubiKey / Security Key</a></li>
+          </ul>
+        </div></div></div>
+      </div>
+      <div class="col-lg-12"><div class="iq-edit-list-data"><div class="tab-content">
+        <div class="tab-pane fade" id="personal-information" role="tabpanel">
+          <div class="iq-card">
+            <div class="iq-card-header"><h4 class="card-title">Personal Information</h4></div>
+            <div class="iq-card-body">
+              <form method="post">{% csrf_token %}{{ profile_form.as_p }}
+                <button type="submit" name="update_profile" class="btn btn-primary">Save</button>
+              </form>
             </div>
+          </div>
         </div>
+        <div class="tab-pane fade" id="change-password" role="tabpanel">
+          <div class="iq-card">
+            <div class="iq-card-header"><h4 class="card-title">Change Password</h4></div>
+            <div class="iq-card-body">
+              <form method="post">{% csrf_token %}{{ password_form.as_p }}
+                <button type="submit" name="change_password" class="btn btn-warning">Update Password</button>
+              </form>
+            </div>
+          </div>
+        </div>
+        <div class="tab-pane fade" id="two-factor" role="tabpanel">
+          <div class="iq-card">
+            <div class="iq-card-header"><h4 class="card-title">Authenticator App</h4></div>
+            <div class="iq-card-body">
+              {% if user.userprofile.two_factor_enabled %}
+                <p class="text-success">Authenticator-app 2FA is <strong>enabled</strong>.</p>
+                <form method="post">{% csrf_token %}
+                  <div class="form-group">
+                    <label for="otp-disable">Enter a 6-digit code to disable it:</label>
+                    <input id="otp-disable" type="text" name="otp" inputmode="numeric"
+                           autocomplete="one-time-code" class="form-control" required>
+                  </div>
+                  <button type="submit" name="disable_2fa" class="btn btn-danger">Disable authenticator app</button>
+                </form>
+              {% else %}
+                <p class="text-muted">Use a TOTP authenticator application as a second factor.</p>
+                {% if qr_code and secret %}
+                  <p>Scan this QR code with your authenticator app:</p>
+                  <img src="data:image/png;base64,{{ qr_code }}" alt="Authenticator setup QR code"
+                       class="mb-3" style="max-width: 200px;">
+                  <p>Or use this secret key: <code>{{ secret }}</code></p>
+                  <form method="post">{% csrf_token %}
+                    <div class="form-group">
+                      <label for="otp-enable">Enter the 6-digit code:</label>
+                      <input id="otp-enable" type="text" name="otp" inputmode="numeric"
+                             autocomplete="one-time-code" class="form-control" required>
+                    </div>
+                    <button type="submit" name="enable_2fa" class="btn btn-success">Enable authenticator app</button>
+                  </form>
+                {% else %}
+                  <form method="post">{% csrf_token %}
+                    <button type="submit" name="start_2fa" class="btn btn-info">Start authenticator setup</button>
+                  </form>
+                {% endif %}
+              {% endif %}
+            </div>
+          </div>
+        </div>
+        <div class="tab-pane fade" id="yubikey" role="tabpanel">
+          <div class="iq-card">
+            <div class="iq-card-header"><h4 class="card-title">YubiKey / Security Key</h4></div>
+            <div class="iq-card-body">
+              {% csrf_token %}
+              {% if webauthn_configured %}
+                <p>Register a YubiKey or another FIDO2/WebAuthn security key. Your password remains
+                   the first factor and touching the key provides the second factor.</p>
+                <div class="alert alert-warning">Before signing out, keep the authenticator app enabled or register a second security key. Losing your only key requires an administrative account-recovery procedure.</div>
+                <div id="yubikey-status" class="alert d-none" role="status" aria-live="polite"></div>
+                {% if yubikey_credentials %}
+                  <h5>Registered security keys</h5>
+                  <div class="table-responsive mb-4"><table class="table">
+                    <thead><tr><th>Name</th><th>Registered</th><th>Last used</th><th>Action</th></tr></thead>
+                    <tbody>
+                    {% for credential in yubikey_credentials %}
+                      <tr>
+                        <td>{{ credential.name }}</td>
+                        <td>{{ credential.created_at|date:"Y-m-d H:i" }} UTC</td>
+                        <td>{% if credential.last_used_at %}{{ credential.last_used_at|date:"Y-m-d H:i" }} UTC{% else %}Never{% endif %}</td>
+                        <td>
+                          <form class="yubikey-delete-form"
+                                data-url="{% url 'wafinstaller:yubikey_delete' credential.id %}">
+                            <label class="sr-only" for="delete-password-{{ credential.id }}">Current password</label>
+                            <input id="delete-password-{{ credential.id }}" type="password"
+                                   name="current_password" autocomplete="current-password"
+                                   class="form-control form-control-sm mb-2"
+                                   placeholder="Current password" required>
+                            <button type="submit" class="btn btn-sm btn-danger">Remove</button>
+                          </form>
+                        </td>
+                      </tr>
+                    {% endfor %}
+                    </tbody>
+                  </table></div>
+                {% else %}
+                  <p class="text-muted">No security key is registered.</p>
+                {% endif %}
+                <h5>Add a security key</h5>
+                <form id="yubikey-registration-form">
+                  <div class="form-group">
+                    <label for="yubikey-name">Key name</label>
+                    <input id="yubikey-name" name="name" type="text" maxlength="80"
+                           class="form-control" placeholder="For example: Main YubiKey" required>
+                  </div>
+                  <div class="form-group">
+                    <label for="yubikey-password">Current password</label>
+                    <input id="yubikey-password" name="current_password" type="password"
+                           autocomplete="current-password" class="form-control" required>
+                  </div>
+                  <button id="yubikey-register-button" type="submit" class="btn btn-primary">Add security key</button>
+                </form>
+              {% else %}
+                <div class="alert alert-warning">WebAuthn is not configured on this server. Set the RP ID and
+                  allowed HTTPS origin before registering a security key.</div>
+              {% endif %}
+            </div>
+          </div>
+        </div>
+      </div></div></div>
     </div>
+  </div>
+</div>
+<script>
+document.addEventListener("DOMContentLoaded", function () {
+  const tab = "{{ active_tab|default:'personal-information'|escapejs }}";
+  document.querySelector('a[href="#' + tab + '"]')?.classList.add("active");
+  document.querySelector("#" + tab)?.classList.add("show", "active");
+  const csrfInput = document.querySelector('input[name="csrfmiddlewaretoken"]');
+  const csrfToken = csrfInput ? csrfInput.value : "";
+  const status = document.getElementById("yubikey-status");
 
-    <!-- Auto-activate tab -->
-    <script>
-        document.addEventListener("DOMContentLoaded", function () {
-            const tab = "{{ active_tab|default:'personal-information' }}";
-            if (tab) {
-                document.querySelector(`a[href="#${tab}"]`)?.classList.add('active');
-                document.querySelector(`#${tab}`)?.classList.add('show', 'active');
-            }
+  function showStatus(message, kind) {
+    if (!status) return;
+    status.textContent = message;
+    status.className = "alert alert-" + kind;
+  }
+  function decodeBase64Url(value) {
+    const base64 = value.replace(/-/g, "+").replace(/_/g, "/");
+    const padded = base64 + "=".repeat((4 - base64.length % 4) % 4);
+    return Uint8Array.from(atob(padded), character => character.charCodeAt(0));
+  }
+  function encodeBase64Url(value) {
+    let binary = "";
+    new Uint8Array(value).forEach(byte => binary += String.fromCharCode(byte));
+    return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+  }
+  function decodeCreationOptions(options) {
+    options.challenge = decodeBase64Url(options.challenge);
+    options.user.id = decodeBase64Url(options.user.id);
+    (options.excludeCredentials || []).forEach(item => item.id = decodeBase64Url(item.id));
+    return options;
+  }
+  function serializeRegistration(credential) {
+    return {
+      id: credential.id,
+      rawId: encodeBase64Url(credential.rawId),
+      type: credential.type,
+      authenticatorAttachment: credential.authenticatorAttachment,
+      clientExtensionResults: credential.getClientExtensionResults(),
+      response: {
+        clientDataJSON: encodeBase64Url(credential.response.clientDataJSON),
+        attestationObject: encodeBase64Url(credential.response.attestationObject),
+        transports: credential.response.getTransports ? credential.response.getTransports() : []
+      }
+    };
+  }
+  async function jsonRequest(url, options) {
+    const response = await fetch(url, {
+      credentials: "same-origin",
+      headers: {"Content-Type": "application/json", "X-CSRFToken": csrfToken},
+      ...options
+    });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || "Operation failed.");
+    return data;
+  }
+
+  const registrationForm = document.getElementById("yubikey-registration-form");
+  registrationForm?.addEventListener("submit", async event => {
+    event.preventDefault();
+    const button = document.getElementById("yubikey-register-button");
+    button.disabled = true;
+    showStatus("Waiting for your security key…", "info");
+    try {
+      if (!window.PublicKeyCredential || !navigator.credentials) {
+        throw new Error("This browser does not support WebAuthn.");
+      }
+      const values = new FormData(registrationForm);
+      const beginResponse = await fetch(
+        "{% url 'wafinstaller:yubikey_registration_options' %}",
+        {method: "POST", credentials: "same-origin",
+         headers: {"X-CSRFToken": csrfToken}, body: values}
+      );
+      const options = await beginResponse.json();
+      if (!beginResponse.ok) throw new Error(options.error || "Registration failed.");
+      const credential = await navigator.credentials.create({
+        publicKey: decodeCreationOptions(options.publicKey)
+      });
+      await jsonRequest(
+        "{% url 'wafinstaller:yubikey_registration_complete' %}",
+        {method: "POST", body: JSON.stringify({credential: serializeRegistration(credential)})}
+      );
+      showStatus("Security key registered successfully.", "success");
+      window.setTimeout(function () {
+        window.location.href = "{% url 'wafinstaller:admin_profile' %}?tab=yubikey";
+      }, 600);
+    } catch (error) {
+      showStatus(error.message || "Security key registration failed.", "danger");
+      button.disabled = false;
+    } finally {
+      document.getElementById("yubikey-password").value = "";
+    }
+  });
+
+  document.querySelectorAll(".yubikey-delete-form").forEach(form => {
+    form.addEventListener("submit", async event => {
+      event.preventDefault();
+      if (!window.confirm("Remove this security key?")) return;
+      const values = new FormData(form);
+      try {
+        const response = await fetch(form.dataset.url, {
+          method: "POST", credentials: "same-origin",
+          headers: {"X-CSRFToken": csrfToken}, body: values
         });
-    </script>
-
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || "Removal failed.");
+        window.location.href = "{% url 'wafinstaller:admin_profile' %}?tab=yubikey";
+      } catch (error) {
+        showStatus(error.message || "Security key removal failed.", "danger");
+      } finally {
+        form.querySelector('input[name="current_password"]').value = "";
+      }
+    });
+  });
+});
+</script>
 {% endblock %}

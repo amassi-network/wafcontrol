@@ -14,6 +14,13 @@ from wafinstaller.policy_views import (
     RuleExclusionUpdateView,
     WafPolicyCreateView,
 )
+from wafinstaller.webauthn_views import (
+    YubiKeyAuthenticationCompleteView,
+    YubiKeyAuthenticationOptionsView,
+    YubiKeyDeleteView,
+    YubiKeyRegistrationCompleteView,
+    YubiKeyRegistrationOptionsView,
+)
 from wafinstaller.views import (
     AddCustomRuleView,
     AdminProfileView,
@@ -52,6 +59,16 @@ urlpatterns = [
     # Auth
     path("login/", LoginsView.as_view(), name="login"),
     path("verify-2fa/", Verify2FAView.as_view(), name="verify_2fa"),
+    path(
+        "verify-2fa/yubikey/options/",
+        YubiKeyAuthenticationOptionsView.as_view(),
+        name="yubikey_authentication_options",
+    ),
+    path(
+        "verify-2fa/yubikey/complete/",
+        YubiKeyAuthenticationCompleteView.as_view(),
+        name="yubikey_authentication_complete",
+    ),
     path("dashboard/logout/", CustomLogoutView.as_view(), name="logout"),
     # Dashboard
     path("dashboard/", DashboardView.as_view(), name="dashboard"),
@@ -193,4 +210,19 @@ urlpatterns = [
     # App config + Admin profile
     path("dashboard/settings/", AppSettingsView.as_view(), name="app_settings"),
     path("dashboard/profile/", AdminProfileView.as_view(), name="admin_profile"),
+    path(
+        "dashboard/profile/yubikey/register/options/",
+        YubiKeyRegistrationOptionsView.as_view(),
+        name="yubikey_registration_options",
+    ),
+    path(
+        "dashboard/profile/yubikey/register/complete/",
+        YubiKeyRegistrationCompleteView.as_view(),
+        name="yubikey_registration_complete",
+    ),
+    path(
+        "dashboard/profile/yubikey/<int:credential_id>/delete/",
+        YubiKeyDeleteView.as_view(),
+        name="yubikey_delete",
+    ),
 ]

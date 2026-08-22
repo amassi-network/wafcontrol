@@ -11,6 +11,7 @@ import matplotlib.pyplot as plt
 import pyotp
 import qrcode
 from celery.result import AsyncResult
+from django.conf import settings
 from django.contrib import messages
 from django.contrib.auth import get_user_model, login, update_session_auth_hash
 from django.contrib.auth.decorators import login_required
@@ -70,6 +71,18 @@ from .policy_forms import TriageDecisionForm
 from .tasks import fetch_crs_versions_task, run_waf_install
 
 User = get_user_model()
+
+
+def _pre_2fa_user(request):
+    user_id = request.session.get("pre_2fa_user_id")
+    if not user_id:
+        return None
+    try:
+        return User.objects.select_related("userprofile").get(
+            pk=user_id, is_active=True, is_superuser=True
+        )
+    except User.DoesNotExist:
+        return None
 
 
 def _rule_file(filename, *, allowed_suffixes=(".conf", ".data")):
@@ -188,10 +201,14 @@ class LoginsView(LoginView):
         profile, _ = UserProfile.objects.get_or_create(user=user)
         self.request.session["pre_2fa_user_id"] = user.id
 
-        if profile.two_factor_enabled:
+        if (
+            profile.two_factor_enabled
+            or user.webauthn_credentials.exists()
+        ):
             return redirect("wafinstaller:verify_2fa")
 
         login(self.request, user)
+        self.request.session.pop("pre_2fa_user_id", None)
         return redirect("/dashboard/")
 
     def form_invalid(self, form):
@@ -206,7 +223,18 @@ class Verify2FAView(View):
         if not request.session.get("pre_2fa_user_id"):
             messages.error(request, _("Session expired. Please log in again."))
             return redirect("wafinstaller:login")
-        return render(request, self.template_name)
+        user = _pre_2fa_user(request)
+        if user is None:
+            messages.error(request, _("Invalid authentication state."))
+            return redirect("wafinstaller:login")
+        return render(
+            request,
+            self.template_name,
+            {
+                "totp_enabled": user.userprofile.two_factor_enabled,
+                "yubikey_enabled": user.webauthn_credentials.exists(),
+            },
+        )
 
     def post(self, request):
         user_id = request.session.get("pre_2fa_user_id")
@@ -214,22 +242,51 @@ class Verify2FAView(View):
             messages.error(request, _("Session expired. Please log in again."))
             return redirect("wafinstaller:login")
 
-        try:
-            user = User.objects.select_related("userprofile").get(id=user_id)
-            secret = user.userprofile.two_factor_secret
-        except (User.DoesNotExist, AttributeError):
+        user = _pre_2fa_user(request)
+        if user is None:
             messages.error(request, _("Invalid authentication state."))
             return redirect("wafinstaller:login")
+        try:
+            profile = user.userprofile
+            secret = profile.two_factor_secret
+        except AttributeError:
+            messages.error(request, _("Invalid authentication state."))
+            return redirect("wafinstaller:login")
+
+        if not profile.two_factor_enabled or not secret:
+            messages.error(request, _("Authenticator-app verification is not enabled."))
+            return render(
+                request,
+                self.template_name,
+                {
+                    "totp_enabled": False,
+                    "yubikey_enabled": user.webauthn_credentials.exists(),
+                },
+            )
 
         code = request.POST.get("otp", "").strip()
         if not code or len(code) != 6 or not code.isdigit():
             messages.error(request, _("Please enter a valid 6-digit 2FA code."))
-            return render(request, self.template_name)
+            return render(
+                request,
+                self.template_name,
+                {
+                    "totp_enabled": True,
+                    "yubikey_enabled": user.webauthn_credentials.exists(),
+                },
+            )
 
         totp = pyotp.TOTP(secret)
         if not totp.verify(code):
             messages.error(request, _("Invalid 2FA code. Please try again."))
-            return render(request, self.template_name)
+            return render(
+                request,
+                self.template_name,
+                {
+                    "totp_enabled": True,
+                    "yubikey_enabled": user.webauthn_credentials.exists(),
+                },
+            )
 
         login(request, user)
         request.session.pop("pre_2fa_user_id", None)
@@ -1225,6 +1282,7 @@ class AdminProfileView(AuditedMutationMixin, LoginRequiredMixin, View):
             qr_code = base64.b64encode(buffer.getvalue()).decode()
 
         active_tab = request.GET.get("tab", "personal-information")
+        yubikey_credentials = request.user.webauthn_credentials.all()
 
         return render(
             request,
@@ -1235,6 +1293,11 @@ class AdminProfileView(AuditedMutationMixin, LoginRequiredMixin, View):
                 "qr_code": qr_code,
                 "secret": profile.two_factor_secret,
                 "active_tab": active_tab,
+                "yubikey_credentials": yubikey_credentials,
+                "webauthn_configured": bool(
+                    settings.WEBAUTHN_RP_ID
+                    and settings.WEBAUTHN_ALLOWED_ORIGINS
+                ),
             },
         )
 

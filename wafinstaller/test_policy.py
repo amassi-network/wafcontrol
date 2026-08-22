@@ -930,6 +930,11 @@ class DeploymentConfigRendererTests(SimpleTestCase):
             )
             self.assertNotIn("@@", rendered)
             self.assertIn("allow 198.51.100.8/32;", rendered)
+            self.assertIn("WEBAUTHN_RP_ID=waf.example.net", rendered)
+            self.assertIn(
+                "WEBAUTHN_ALLOWED_ORIGINS=https://waf.example.net:7000",
+                rendered,
+            )
             self.assertIn('target="192.0.2.20"', rendered)
             includes = (output / "modsecurity" / "main.conf").read_text().splitlines()
             self.assertLess(

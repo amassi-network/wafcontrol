@@ -136,6 +136,8 @@ Dashboard sources live in `frontend/static`; collected files are written to
 
 ## Production deployment
 
+WAFControl also supports YubiKey and cross-platform FIDO2/WebAuthn security keys. See the [YubiKey operations guide](docs/operations/WEBAUTHN_YUBIKEY.md) for configuration, enrolment and recovery.
+
 For a reproducible Nginx, ModSecurity, CRS, PostgreSQL, Celery and MapAttack deployment, use the standalone [deployment runbook](docs/operations/DEPLOYMENT.md). Operators and automation agents should also follow the [agent handoff checklist](docs/operations/AGENT_HANDOFF.md). The [sanitised Ironitia inventory](docs/operations/PRODUCTION_INVENTORY_IRONITIA.md) records the validated reference topology without secrets.
 
 Render a site-specific, secret-free configuration bundle with `scripts/render_deployment_config.sh`; do not copy Ironitia addresses or exclusions to another site.

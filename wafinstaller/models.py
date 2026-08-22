@@ -48,6 +48,31 @@ class UserProfile(models.Model):
     two_factor_secret = models.CharField(max_length=32, blank=True, null=True)
 
 
+class WebAuthnCredential(models.Model):
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="webauthn_credentials",
+    )
+    name = models.CharField(max_length=80)
+    credential_id = models.BinaryField(unique=True, editable=False)
+    credential_data = models.BinaryField(editable=False)
+    sign_count = models.PositiveBigIntegerField(default=0)
+    transports = models.JSONField(default=list, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    last_used_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ("name", "id")
+
+    def __str__(self):
+        return f"{self.user.username}: {self.name}"
+
+    @property
+    def credential_id_hex(self):
+        return bytes(self.credential_id).hex()
+
+
 class CrsVersion(models.Model):
     tag = models.CharField(max_length=100, unique=True)
     published_at = models.DateTimeField()
