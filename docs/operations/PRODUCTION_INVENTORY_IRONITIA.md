@@ -140,6 +140,8 @@ No automated PostgreSQL backup was present at the start of the inventory. The da
 
 Other known gaps:
 
+- Django `check --deploy` reports W004 and W008 because HSTS and HTTPS redirection are currently enforced at Nginx rather than in Django; the proxy controls must remain part of acceptance evidence;
+
 - off-host backup replication and restore rehearsal remain to be implemented;
 - service privilege separation is not yet complete;
 - port 7000 restriction relies on Nginx only;

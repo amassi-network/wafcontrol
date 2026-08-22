@@ -387,7 +387,7 @@ example password in shell history. Rehearse restore on a disposable system.
 
 A deployment is not complete until evidence exists for all of these:
 
-- `nginx -t`, `manage.py check --deploy`, migrations and project tests pass.
+- `nginx -t`, migrations and project tests pass; every `manage.py check --deploy` warning is either corrected or explicitly mapped to an equivalent reverse-proxy control.
 - Nginx, PostgreSQL, Redis, rsyslog, Gunicorn, Celery worker and beat are active.
 - Dashboard login and static assets return successfully from the allow-listed IP.
 - TCP 7000 returns 403 or is filtered from a non-allow-listed external source.
@@ -456,6 +456,8 @@ before attempting it. A VM snapshot is the safest full rollback.
 `CSRF_TRUSTED_ORIGINS`, including `https://` and non-default port; confirm
 Nginx sends `Host` and `X-Forwarded-Proto https`; restart Gunicorn after
 editing `.env`.
+
+**Django deployment-check warnings W004/W008:** these can appear when HSTS and HTTP-to-HTTPS redirection are enforced by Nginx instead of Django. Capture the effective Nginx redirect and HSTS header as evidence; do not simply suppress the warnings. Alternatively configure the Django settings after validating proxy and health-check behaviour.
 
 **Dashboard has no styling:** run `collectstatic --clear --noinput`, confirm
 `STATIC_ROOT=/opt/WafControl/staticfiles`, Nginx alias and directory traversal
