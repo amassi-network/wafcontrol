@@ -760,6 +760,18 @@ class SyslogSecurityEventTests(SimpleTestCase):
         send.assert_called_once()
         self.assertEqual(send.call_args.args[0], syslog.LOG_WARNING)
 
+    def test_classifies_by_crs_family_before_transaction_tags(self):
+        attack = self._attack(
+            rule_id="932235",
+            message="Remote Command Execution",
+            rule_tags=["attack-sqli", "attack-rce"],
+        )
+
+        self.assertIn(
+            "[Classification: Remote Command Execution]",
+            format_attack_syslog(attack),
+        )
+
     def test_extracts_complete_modsecurity_network_tuple(self):
         sections = {
             "A": [

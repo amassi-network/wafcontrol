@@ -16,14 +16,29 @@ def attack_priority(attack):
 
 
 def attack_classification(attack):
+    family = str(attack.rule_id)[:3]
+    classifications = {
+        "913": "Security Scanner Activity",
+        "920": "HTTP Protocol Violation",
+        "930": "Path Traversal or Local File Access",
+        "931": "Remote File Inclusion",
+        "932": "Remote Command Execution",
+        "933": "PHP Injection",
+        "934": "Generic Application Attack",
+        "941": "Web Application Cross Site Scripting",
+        "942": "Web Application SQL Injection",
+        "949": "Inbound Anomaly Score Exceeded",
+        "959": "Outbound Anomaly Score Exceeded",
+        "980": "Web Application Correlation",
+    }
+    if family in classifications:
+        return classifications[family]
     tags = {str(tag).lower() for tag in attack.rule_tags}
     message = attack.message.lower()
     if any("sqli" in tag for tag in tags) or "sql injection" in message:
         return "Web Application SQL Injection"
     if any("xss" in tag for tag in tags) or "cross-site scripting" in message:
         return "Web Application Cross Site Scripting"
-    if any(value in " ".join(tags) for value in ("rce", "lfi", "rfi")):
-        return "Web Application Attack"
     if attack.status == "Blocked":
         return "Attempted Web Application Attack"
     return "Potentially Bad Traffic"
