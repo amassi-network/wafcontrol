@@ -15,7 +15,7 @@ This is an inventory, not a generic install script. Use
 | Application checkout | `/opt/WafControl` |
 | Dashboard | `https://ironitia.com:7000/` |
 | Allowed dashboard source | `2.136.9.164` |
-| Production code revision before documentation lot | `4f2eb7d` |
+| Production code revision | `de77e73` |
 | Protected web server | Nginx |
 | ModSecurity mode | `DetectionOnly` |
 | Active CRS | 4.29.0 |
@@ -51,6 +51,7 @@ These units are enabled and active:
 - `wafcontrol.service`
 - `wafcontrol-celery-worker.service`
 - `wafcontrol-celery-beat.service`
+- `wafcontrol-backup.timer`
 
 Gunicorn uses three workers, a 120-second timeout and
 `/run/wafcontrol/gunicorn.sock`. The application and Celery units currently
@@ -81,10 +82,7 @@ The intended include order is:
 5. CRS 4.29.0 rule files
 6. WAFControl AFTER policy
 
-The 2026-08-22 audit found that the CRS updater could move the AFTER policy
-before CRS. The repository now contains a deterministic renderer and regression
-test. Production must be reported as corrected only after the revised scripts
-are deployed, `nginx -t` passes and the resulting include order is captured.
+The 2026-08-22 audit found that the CRS updater could move the AFTER policy before CRS. The deterministic renderer and regression test were deployed in `de77e73`. At 13:39 UTC, production was reordered successfully, `nginx -t` passed, Nginx reloaded and the intended order above was captured.
 
 Effective important directives:
 
@@ -138,13 +136,11 @@ Pre-syslog deployment backups created on the host:
 - `/root/wafcontrol-pre-syslog-20260822.dump`
 - `/root/wafcontrol-code-pre-syslog-20260822.tar.gz`
 
-No automated PostgreSQL backup was found during this inventory. The repository
-now supplies a daily backup service/timer template, but it is not considered
-active in production until installed, run once, checksum-verified and copied
-off-host.
+No automated PostgreSQL backup was present at the start of the inventory. The daily backup service and timer were installed on 2026-08-22. The first run created PostgreSQL, code and deployment-configuration archives under `/var/backups/wafcontrol`; all checksums passed. The next required step is encrypted off-host replication and a restore rehearsal.
 
 Other known gaps:
 
+- off-host backup replication and restore rehearsal remain to be implemented;
 - service privilege separation is not yet complete;
 - port 7000 restriction relies on Nginx only;
 - Fail2ban/CrowdSec feedback is not deployed;
