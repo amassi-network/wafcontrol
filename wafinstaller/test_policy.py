@@ -978,6 +978,28 @@ class DeploymentConfigRendererTests(SimpleTestCase):
             )
             self.assertEqual((output / "wafcontrol.env").stat().st_mode & 0o777, 0o600)
 
+            env_file = output / "wafcontrol.env"
+            env_file.write_text(
+                env_file.read_text()
+                .replace("[GENERATE A UNIQUE SECRET]", "test-secret")
+                .replace("[TO BE COMPLETED]", "test-value")
+            )
+            sourced = subprocess.run(
+                [
+                    "bash",
+                    "-eu",
+                    "-c",
+                    '. "$1"; printf "%s" "$WEBAUTHN_RP_NAME"',
+                    "bash",
+                    str(env_file),
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(sourced.returncode, 0, sourced.stderr)
+            self.assertEqual(sourced.stdout, "OWASP WAFControl")
+
     def test_renderer_refuses_missing_required_input(self):
         environment = self.site_environment.copy()
         environment.pop("WAF_ADMIN_ALLOW_IP")

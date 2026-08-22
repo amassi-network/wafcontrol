@@ -30,7 +30,7 @@ For the Ironitia dashboard on `https://ironitia.com:7000`:
 
 ```dotenv
 WEBAUTHN_RP_ID=ironitia.com
-WEBAUTHN_RP_NAME=OWASP WAFControl
+WEBAUTHN_RP_NAME="OWASP WAFControl"
 WEBAUTHN_ALLOWED_ORIGINS=https://ironitia.com:7000
 WEBAUTHN_CHALLENGE_TTL_SECONDS=300
 ```
