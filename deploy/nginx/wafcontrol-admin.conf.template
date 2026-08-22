@@ -1,5 +1,6 @@
 server {
     listen @@PUBLIC_IP@@:@@ADMIN_PORT@@ ssl;
+    @@PUBLIC_IPV6_LISTEN@@
     server_name @@DOMAIN@@;
 
     ssl_certificate /etc/letsencrypt/live/@@CERT_NAME@@/fullchain.pem;
@@ -9,7 +10,7 @@ server {
     ssl_session_timeout 1h;
     ssl_session_tickets off;
 
-    allow @@ADMIN_ALLOW_IP@@;
+    @@ADMIN_ALLOW_RULES@@
     deny all;
 
     server_tokens off;

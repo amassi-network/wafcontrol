@@ -8,8 +8,8 @@ missing site values from the Ironitia inventory.
 
 - target host and authorised SSH identity;
 - reviewed repository URL plus exact tag or commit;
-- dashboard DNS name and public bind address;
-- dashboard administrator allow-list CIDR;
+- dashboard DNS name and public IPv4 plus optional IPv6 bind addresses;
+- dashboard administrator allow-list CIDRs;
 - protected Nginx virtual hosts and upstream ownership;
 - certificate/ACME method;
 - MapAttack receiver address, TCP port and receiver owner;

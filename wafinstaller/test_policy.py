@@ -886,7 +886,10 @@ class DeploymentConfigRendererTests(SimpleTestCase):
             **os.environ,
             "WAF_DOMAIN": "waf.example.net",
             "WAF_PUBLIC_IP": "192.0.2.10",
-            "WAF_ADMIN_ALLOW_IP": "198.51.100.8/32",
+            "WAF_PUBLIC_IPV6": "2001:db8::10",
+            "WAF_ADMIN_ALLOW_IP": (
+                "198.51.100.8/32,203.0.113.9/32,2001:db8:1::/64"
+            ),
             "WAF_CRS_VERSION": "4.29.0",
             "WAF_MAPATTACK_HOST": "192.0.2.20",
             "WAF_MAPATTACK_PORT": "514",
@@ -929,7 +932,13 @@ class DeploymentConfigRendererTests(SimpleTestCase):
                 path.read_text() for path in output.rglob("*") if path.is_file()
             )
             self.assertNotIn("@@", rendered)
-            self.assertIn("allow 198.51.100.8/32;", rendered)
+            admin_vhost = (
+                output / "nginx" / "wafcontrol-admin.conf"
+            ).read_text()
+            self.assertIn("listen [2001:db8::10]:7000 ssl;", admin_vhost)
+            self.assertIn("allow 198.51.100.8/32;", admin_vhost)
+            self.assertIn("allow 203.0.113.9/32;", admin_vhost)
+            self.assertIn("allow 2001:db8:1::/64;", admin_vhost)
             self.assertIn("WEBAUTHN_RP_ID=waf.example.net", rendered)
             self.assertIn(
                 "WEBAUTHN_ALLOWED_ORIGINS=https://waf.example.net:7000",
@@ -971,3 +980,67 @@ class DeploymentConfigRendererTests(SimpleTestCase):
 
         self.assertEqual(result.returncode, 2)
         self.assertIn("WAF_ADMIN_ALLOW_IP", result.stderr)
+
+    def test_renderer_omits_optional_ipv6_listener(self):
+        environment = self.site_environment.copy()
+        environment.pop("WAF_PUBLIC_IPV6")
+        with TemporaryDirectory() as directory:
+            output = Path(directory) / "rendered"
+            result = subprocess.run(
+                [str(self.script), str(output)],
+                env=environment,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            admin_vhost = (
+                output / "nginx" / "wafcontrol-admin.conf"
+            ).read_text()
+            self.assertNotIn("listen [", admin_vhost)
+            self.assertNotIn("@@PUBLIC_IPV6_LISTEN@@", admin_vhost)
+
+    def test_renderer_refuses_invalid_admin_address_lists(self):
+        invalid_lists = (
+            "198.51.100.8/32,,203.0.113.9/32",
+            "999.51.100.8/32",
+            "198.51.100.8/32;deny",
+            "2001:db8::/129",
+        )
+        for invalid_list in invalid_lists:
+            with self.subTest(invalid_list=invalid_list):
+                environment = {
+                    **self.site_environment,
+                    "WAF_ADMIN_ALLOW_IP": invalid_list,
+                }
+                with TemporaryDirectory() as directory:
+                    result = subprocess.run(
+                        [str(self.script), str(Path(directory) / "rendered")],
+                        env=environment,
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                    )
+
+                self.assertEqual(result.returncode, 2)
+                self.assertIn("administration address/CIDR", result.stdout)
+
+    def test_renderer_refuses_invalid_public_addresses(self):
+        invalid_values = (
+            ("WAF_PUBLIC_IP", "192.0.2.999"),
+            ("WAF_PUBLIC_IPV6", "2001:db8::10/64"),
+        )
+        for name, value in invalid_values:
+            with self.subTest(name=name):
+                environment = {**self.site_environment, name: value}
+                with TemporaryDirectory() as directory:
+                    result = subprocess.run(
+                        [str(self.script), str(Path(directory) / "rendered")],
+                        env=environment,
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                    )
+
+                self.assertEqual(result.returncode, 2)

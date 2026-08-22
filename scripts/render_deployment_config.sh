@@ -22,11 +22,52 @@ WAF_CERT_NAME="${WAF_CERT_NAME:-$WAF_DOMAIN}"
 WAF_APP_ROOT="${WAF_APP_ROOT:-/opt/WafControl}"
 WAF_SERVICE_USER="${WAF_SERVICE_USER:-root}"
 WAF_SERVICE_GROUP="${WAF_SERVICE_GROUP:-www-data}"
+WAF_PUBLIC_IPV6="${WAF_PUBLIC_IPV6:-}"
+
+command -v python3 >/dev/null 2>&1 || {
+  echo "[x] python3 is required to validate deployment addresses." >&2
+  exit 1
+}
+
+valid_ip_address() {
+  python3 -c '
+import ipaddress
+import sys
+
+address = ipaddress.ip_address(sys.argv[1])
+raise SystemExit(address.version != int(sys.argv[2]))
+' "$1" "$2" >/dev/null 2>&1
+}
+
+valid_admin_address() {
+  python3 -c '
+import ipaddress
+import sys
+
+ipaddress.ip_network(sys.argv[1])
+' "$1" >/dev/null 2>&1
+}
 
 [[ "$WAF_DOMAIN" =~ ^[A-Za-z0-9.-]+$ ]] || { echo "[x] Invalid domain."; exit 2; }
 [[ "$WAF_CERT_NAME" =~ ^[A-Za-z0-9.-]+$ ]] || { echo "[x] Invalid certificate name."; exit 2; }
-[[ "$WAF_PUBLIC_IP" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]] || { echo "[x] This renderer currently requires a public IPv4 address."; exit 2; }
-[[ "$WAF_ADMIN_ALLOW_IP" =~ ^[0-9A-Fa-f:./]+$ ]] || { echo "[x] Invalid administration address/CIDR."; exit 2; }
+valid_ip_address "$WAF_PUBLIC_IP" 4 || { echo "[x] This renderer requires a valid public IPv4 address."; exit 2; }
+if [[ -n "$WAF_PUBLIC_IPV6" ]]; then
+  valid_ip_address "$WAF_PUBLIC_IPV6" 6 || {
+    echo "[x] Invalid public IPv6 address."
+    exit 2
+  }
+fi
+[[ "$WAF_ADMIN_ALLOW_IP" != ,* && "$WAF_ADMIN_ALLOW_IP" != *, && "$WAF_ADMIN_ALLOW_IP" != *,,* ]] || {
+  echo "[x] Invalid administration address/CIDR list."
+  exit 2
+}
+IFS=',' read -r -a admin_allow_addresses <<< "$WAF_ADMIN_ALLOW_IP"
+for address in "${admin_allow_addresses[@]}"; do
+  valid_admin_address "$address" || {
+    echo "[x] Invalid administration address/CIDR: $address"
+    exit 2
+  }
+done
 [[ "$WAF_MAPATTACK_HOST" =~ ^[A-Za-z0-9:.-]+$ ]] || { echo "[x] Invalid MapAttack host."; exit 2; }
 [[ "$WAF_ADMIN_PORT" =~ ^[0-9]{1,5}$ ]] || { echo "[x] Invalid administration port."; exit 2; }
 [[ "$WAF_MAPATTACK_PORT" =~ ^[0-9]{1,5}$ ]] || { echo "[x] Invalid MapAttack port."; exit 2; }
@@ -41,10 +82,38 @@ mkdir -p "$OUTPUT_DIR"/{nginx,systemd,rsyslog,modsecurity}
 render() {
   local source="$1"
   local destination="$2"
-  sed     -e "s|@@DOMAIN@@|$WAF_DOMAIN|g"     -e "s|@@PUBLIC_IP@@|$WAF_PUBLIC_IP|g"     -e "s|@@SENSOR_IP@@|$WAF_PUBLIC_IP|g"     -e "s|@@ADMIN_ALLOW_IP@@|$WAF_ADMIN_ALLOW_IP|g"     -e "s|@@ADMIN_PORT@@|$WAF_ADMIN_PORT|g"     -e "s|@@CERT_NAME@@|$WAF_CERT_NAME|g"     -e "s|@@MAPATTACK_HOST@@|$WAF_MAPATTACK_HOST|g"     -e "s|@@MAPATTACK_PORT@@|$WAF_MAPATTACK_PORT|g"     -e "s|@@APP_ROOT@@|$WAF_APP_ROOT|g"     -e "s|@@SERVICE_USER@@|$WAF_SERVICE_USER|g"     -e "s|@@SERVICE_GROUP@@|$WAF_SERVICE_GROUP|g"     "$source" > "$destination"
+  sed     -e "s|@@DOMAIN@@|$WAF_DOMAIN|g"     -e "s|@@PUBLIC_IP@@|$WAF_PUBLIC_IP|g"     -e "s|@@SENSOR_IP@@|$WAF_PUBLIC_IP|g"     -e "s|@@ADMIN_PORT@@|$WAF_ADMIN_PORT|g"     -e "s|@@CERT_NAME@@|$WAF_CERT_NAME|g"     -e "s|@@MAPATTACK_HOST@@|$WAF_MAPATTACK_HOST|g"     -e "s|@@MAPATTACK_PORT@@|$WAF_MAPATTACK_PORT|g"     -e "s|@@APP_ROOT@@|$WAF_APP_ROOT|g"     -e "s|@@SERVICE_USER@@|$WAF_SERVICE_USER|g"     -e "s|@@SERVICE_GROUP@@|$WAF_SERVICE_GROUP|g"     "$source" > "$destination"
 }
 
-render "$ROOT_DIR/deploy/nginx/wafcontrol-admin.conf.template" "$OUTPUT_DIR/nginx/wafcontrol-admin.conf"
+render_admin_nginx() {
+  local source="$1"
+  local destination="$2"
+  local temporary="${destination}.tmp"
+
+  render "$source" "$temporary"
+  awk \
+    -v allow_addresses="$WAF_ADMIN_ALLOW_IP" \
+    -v public_ipv6="$WAF_PUBLIC_IPV6" \
+    -v admin_port="$WAF_ADMIN_PORT" '
+      /^[[:space:]]*@@PUBLIC_IPV6_LISTEN@@[[:space:]]*$/ {
+        if (public_ipv6 != "") {
+          printf "    listen [%s]:%s ssl;\n", public_ipv6, admin_port
+        }
+        next
+      }
+      /^[[:space:]]*@@ADMIN_ALLOW_RULES@@[[:space:]]*$/ {
+        count = split(allow_addresses, addresses, ",")
+        for (item = 1; item <= count; item++) {
+          printf "    allow %s;\n", addresses[item]
+        }
+        next
+      }
+      { print }
+    ' "$temporary" > "$destination"
+  rm -f "$temporary"
+}
+
+render_admin_nginx "$ROOT_DIR/deploy/nginx/wafcontrol-admin.conf.template" "$OUTPUT_DIR/nginx/wafcontrol-admin.conf"
 render "$ROOT_DIR/deploy/nginx/site-modsecurity.conf.snippet.template" "$OUTPUT_DIR/nginx/site-modsecurity.conf.snippet"
 render "$ROOT_DIR/deploy/rsyslog-wafcontrol-mapattack.conf.template" "$OUTPUT_DIR/rsyslog/60-wafcontrol-mapattack.conf"
 render "$ROOT_DIR/deploy/env.production.template" "$OUTPUT_DIR/wafcontrol.env"

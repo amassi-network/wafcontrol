@@ -60,7 +60,8 @@ Obtain and record these values before changing the target server:
 |---|---|---|
 | `WAF_DOMAIN` | DNS name used by the dashboard | `waf.example.net` |
 | `WAF_PUBLIC_IP` | target public IPv4 and sensor identity | `192.0.2.10` |
-| `WAF_ADMIN_ALLOW_IP` | administrator IPv4/IPv6 CIDR | `198.51.100.8/32` |
+| `WAF_PUBLIC_IPV6` | optional IPv6 dashboard bind address | `2001:db8::10` |
+| `WAF_ADMIN_ALLOW_IP` | comma-separated administrator IPv4/IPv6 CIDRs | `198.51.100.8/32,203.0.113.9/32` |
 | `WAF_CRS_VERSION` | pinned CRS version | `4.29.0` |
 | `WAF_MAPATTACK_HOST` | syslog receiver address | `192.0.2.20` |
 | `WAF_MAPATTACK_PORT` | receiver TCP port | `514` |
@@ -138,7 +139,8 @@ cd /opt/WafControl
 sudo env \
   WAF_DOMAIN=waf.example.net \
   WAF_PUBLIC_IP=192.0.2.10 \
-  WAF_ADMIN_ALLOW_IP=198.51.100.8/32 \
+  WAF_PUBLIC_IPV6=2001:db8::10 \
+  WAF_ADMIN_ALLOW_IP=198.51.100.8/32,203.0.113.9/32 \
   WAF_CRS_VERSION=4.29.0 \
   WAF_MAPATTACK_HOST=192.0.2.20 \
   WAF_MAPATTACK_PORT=514 \
@@ -148,6 +150,12 @@ sudo env \
 
 Inspect every rendered file. The environment file is mode 0600; other rendered
 files are 0644. Rendering does not install or reload anything.
+
+`WAF_ADMIN_ALLOW_IP` accepts one or more comma-separated addresses or CIDRs,
+without spaces. Each value becomes a separate Nginx `allow` directive.
+`WAF_PUBLIC_IPV6` is optional. Configure it only when the dashboard DNS has an
+AAAA record and the administrator allow-list contains the required IPv6 source
+CIDRs; otherwise clients reaching the IPv6 listener will be denied.
 
 ## 8. PostgreSQL and application environment
 
