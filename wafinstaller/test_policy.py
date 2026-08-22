@@ -424,6 +424,18 @@ class PolicyApprovalWorkflowTests(TestCase):
 
 
 class ManagedPolicyInstallerTests(SimpleTestCase):
+    def test_installer_uses_the_deterministic_crs_renderer(self):
+        script = (
+            Path(__file__).resolve().parents[1]
+            / "scripts"
+            / "install_managed_policy.sh"
+        )
+
+        contents = script.read_text()
+
+        self.assertIn("render_nginx_crs_main.sh", contents)
+        self.assertIn("crs-setup", contents)
+
     def test_installer_rejects_unsafe_directory_before_privileged_actions(self):
         script = (
             Path(__file__).resolve().parents[1]

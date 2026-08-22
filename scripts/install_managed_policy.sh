@@ -39,21 +39,24 @@ TEMP_DIR="$(mktemp -d -t wafcontrol-policy-XXXXXX)"
 trap 'rm -rf "$TEMP_DIR"' EXIT
 cp -a "$MAIN_CONF" "$TEMP_DIR/main.conf.previous"
 
-awk -v before_line="Include $BEFORE_FILE" -v after_line="Include $AFTER_FILE" '
-  $0 != before_line && $0 != after_line { print }
-' "$MAIN_CONF" > "$TEMP_DIR/main.conf.clean"
-if ! awk -v before="Include $BEFORE_FILE" -v after="Include $AFTER_FILE" '
-  /Include[[:space:]].*rules\/\*\.conf/ && !inserted {
-    print before
-    print
-    print after
-    inserted = 1
-    next
-  }
-  { print }
-  END { if (!inserted) exit 42 }
-' "$TEMP_DIR/main.conf.clean" > "$TEMP_DIR/main.conf.candidate"; then
-  echo "[x] Active CRS rules include was not found; main.conf was not changed."
+CRS_DIR="$(
+  awk '
+    /Include[[:space:]].*crs-setup\.conf/ {
+      path = $2
+      sub(/\/crs-setup\.conf$/, "", path)
+      print path
+      exit
+    }
+  ' "$MAIN_CONF"
+)"
+if [[ -z "$CRS_DIR" || ! -d "$CRS_DIR/rules" ]]; then
+  echo "[x] Active CRS directory was not found; main.conf was not changed."
+  exit 1
+fi
+if ! WAFCONTROL_POLICY_DIR="$POLICY_DIR" \
+  "$(dirname "$0")/render_nginx_crs_main.sh" \
+  "$MAIN_CONF" "$CRS_DIR" "$TEMP_DIR/main.conf.candidate"; then
+  echo "[x] Managed include rendering failed; main.conf was not changed."
   exit 1
 fi
 
@@ -75,4 +78,3 @@ fi
 echo "[ok] WAFControl managed policy includes installed."
 echo "[ok] Before CRS: $BEFORE_FILE"
 echo "[ok] After CRS:  $AFTER_FILE"
-
