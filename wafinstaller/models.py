@@ -33,6 +33,10 @@ class Attack(models.Model):
     transaction_id = models.CharField(max_length=128, blank=True, db_index=True)
     matched_variable = models.CharField(max_length=255, blank=True)
     rule_tags = models.JSONField(default=list, blank=True)
+    source_port = models.PositiveIntegerField(null=True, blank=True)
+    destination_ip = models.GenericIPAddressField(null=True, blank=True)
+    destination_port = models.PositiveIntegerField(null=True, blank=True)
+    protocol = models.CharField(max_length=8, default="TCP")
 
     def __str__(self):
         return f"{self.timestamp} - {self.ip} - Severity: {self.severity}"

@@ -31,8 +31,39 @@ from .models import (
     DashboardStat,
     RuleExclusion,
 )
+from .security_events import emit_attack_syslog
 
 logger = logging.getLogger(__name__)
+
+
+def _attack_already_seen(transaction_id, **fallback):
+    if transaction_id:
+        return Attack.objects.filter(
+            transaction_id=transaction_id,
+            rule_id=fallback["rule_id"],
+        ).exists()
+    cutoff = timezone.now() - timedelta(minutes=5)
+    return Attack.objects.filter(timestamp__gte=cutoff, **fallback).exists()
+
+
+def _connection_metadata(mod, sections):
+    for line in sections.get("A", []):
+        match = mod.SECTION_A_HEADER.match(line.strip())
+        if not match:
+            continue
+        destination_ip = match.group("dst")
+        return {
+            "source_port": int(match.group("src_port")),
+            "destination_ip": destination_ip if mod.is_ip(destination_ip) else None,
+            "destination_port": int(match.group("dst_port")),
+            "protocol": "TCP",
+        }
+    return {
+        "source_port": None,
+        "destination_ip": None,
+        "destination_port": None,
+        "protocol": "TCP",
+    }
 
 
 # ---------- Script path helpers ----------
@@ -233,6 +264,7 @@ def _update_waf_attacks_core(mod, backend: str) -> str:
             method = mod.method_from_B_sections(sections)
             matched_variable = mod.extract_first(mod.MATCHED_VAR_RE, blk)
             transaction_id = uid or uid_a or ""
+            connection = _connection_metadata(mod, sections)
             blocked = mod.blocked_from_block_text(blk)
 
             severity = mod.extract_severity_from_log(
@@ -257,7 +289,7 @@ def _update_waf_attacks_core(mod, backend: str) -> str:
                     full_uri = cand
 
             for rid, msg in hits:
-                sig = mod.build_sig(
+                sig = f"{transaction_id}|" + mod.build_sig(
                     ip or "",
                     f"{host}|{full_uri}" or "",
                     rid or "",
@@ -269,7 +301,8 @@ def _update_waf_attacks_core(mod, backend: str) -> str:
                     continue
                 inrun_seen.add(sig)
 
-                if Attack.objects.filter(
+                if _attack_already_seen(
+                    transaction_id,
                     ip=ip,
                     uri=full_uri,
                     host=host or None,
@@ -277,7 +310,7 @@ def _update_waf_attacks_core(mod, backend: str) -> str:
                     message=msg,
                     version=ver,
                     status=status,
-                ).exists():
+                ):
                     continue
 
                 country_info = geo_cache.get(ip)
@@ -286,7 +319,7 @@ def _update_waf_attacks_core(mod, backend: str) -> str:
                     geo_cache[ip] = country_info
 
                 try:
-                    Attack.objects.create(
+                    attack = Attack.objects.create(
                         ip=ip,
                         country=country_info.get("country", "-"),
                         flag=country_info.get("iso_code", "-"),
@@ -303,7 +336,15 @@ def _update_waf_attacks_core(mod, backend: str) -> str:
                         transaction_id=transaction_id,
                         matched_variable=matched_variable,
                         rule_tags=sorted(set(tags)),
+                        **connection,
                     )
+                    try:
+                        emit_attack_syslog(attack)
+                    except Exception:
+                        logger.exception(
+                            "Failed to emit WAF alert %s to local syslog",
+                            attack.pk,
+                        )
                     created += 1
                 except IntegrityError:
                     continue

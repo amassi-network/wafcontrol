@@ -136,6 +136,28 @@ Dashboard sources live in `frontend/static`; collected files are written to
 
 ## WAFControl Features
 
+
+### Real-time Syslog security events
+
+Every newly persisted ModSecurity alert is emitted immediately to the local
+Syslog socket with ident `wafcontrol` and facility `local5`. The RFC3164
+message body is intentionally compatible with the common Snort alert shape:
+
+~~~text
+[1:942100:1] MODSEC SQL Injection Attack Detected [Classification: Web Application SQL Injection] [Priority: 1] {TCP} 34.34.254.214:4575 -> 46.28.168.244:443
+~~~
+
+Source and destination addresses and ports are extracted from ModSecurity audit
+section A and stored with the alert. Re-reading a transaction does not emit it
+again, while an identical signature in a new transaction remains a new event.
+The collection jobs run every ten seconds.
+
+The example `deploy/rsyslog-wafcontrol-mapattack.conf` forwards only this
+program over RFC3164/TCP to `46.28.168.76:514`, using a disk-assisted queue.
+Install it in `/etc/rsyslog.d/60-wafcontrol-mapattack.conf`, validate with
+`rsyslogd -N1`, and restart rsyslog. Change the target in that file for another
+MapAttack collector.
+
 - **Attack Control**:  
   - Real-time logging of attacks with detailed insights. 
   - Dedicated **Critical WAF Attacks** section highlighting threats like SQL Injection (SQLi), Remote Code Execution (RCE), and Local File Inclusion (LFI).  

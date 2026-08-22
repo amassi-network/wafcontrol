@@ -1,7 +1,9 @@
 import subprocess
+import syslog
 from hashlib import sha256
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from types import SimpleNamespace
 from unittest.mock import call, patch
 
 from django.conf import settings
@@ -35,7 +37,12 @@ from wafinstaller.policy import (
     effective_policy_snapshot,
     render_policy,
 )
-from wafinstaller.tasks import expire_managed_policy_objects
+from wafinstaller.security_events import emit_attack_syslog, format_attack_syslog
+from wafinstaller.tasks import (
+    _attack_already_seen,
+    _connection_metadata,
+    expire_managed_policy_objects,
+)
 
 
 class ManagedPolicyModelTests(TestCase):
@@ -709,3 +716,97 @@ class ApplicationPolicyMilestoneTests(TestCase):
             with self.subTest(route_name=route_name):
                 response = client.post(reverse(route_name))
                 self.assertEqual(response.status_code, 403)
+
+
+class SyslogSecurityEventTests(SimpleTestCase):
+    def _attack(self, **overrides):
+        values = {
+            "rule_id": "942100",
+            "message": "SQL Injection Attack Detected via libinjection",
+            "status": "Blocked",
+            "severity": 3,
+            "rule_tags": ["attack-sqli"],
+            "protocol": "TCP",
+            "ip": "34.34.254.214",
+            "source_port": 4575,
+            "destination_ip": "46.28.168.244",
+            "destination_port": 443,
+        }
+        values.update(overrides)
+        return SimpleNamespace(**values)
+
+    def test_formats_snort_compatible_network_tuple(self):
+        message = format_attack_syslog(self._attack())
+
+        self.assertEqual(
+            message,
+            "[1:942100:1] MODSEC SQL Injection Attack Detected via libinjection "
+            "[Classification: Web Application SQL Injection] [Priority: 1] "
+            "{TCP} 34.34.254.214:4575 -> 46.28.168.244:443",
+        )
+
+    @patch("wafinstaller.security_events.syslog.syslog")
+    @patch("wafinstaller.security_events.syslog.openlog")
+    def test_emits_each_alert_to_local5_syslog(self, openlog, send):
+        attack = self._attack(status="High", severity=2)
+
+        emit_attack_syslog(attack)
+
+        openlog.assert_called_once_with(
+            "wafcontrol",
+            syslog.LOG_PID,
+            syslog.LOG_LOCAL5,
+        )
+        send.assert_called_once()
+        self.assertEqual(send.call_args.args[0], syslog.LOG_WARNING)
+
+    def test_extracts_complete_modsecurity_network_tuple(self):
+        sections = {
+            "A": [
+                "[22/Aug/2026:03:40:12 +0000] txid 34.34.254.214 4575 46.28.168.244 443"
+            ]
+        }
+
+        metadata = _connection_metadata(attack_nginx, sections)
+
+        self.assertEqual(
+            metadata,
+            {
+                "source_port": 4575,
+                "destination_ip": "46.28.168.244",
+                "destination_port": 443,
+                "protocol": "TCP",
+            },
+        )
+
+
+class SyslogAttackDeduplicationTests(TestCase):
+    def test_same_signature_with_different_transaction_is_not_suppressed(self):
+        common = {
+            "ip": "34.34.254.214",
+            "uri": "/.env",
+            "host": "ironitia.com",
+            "rule_id": "930120",
+            "message": "OS File Access Attempt",
+            "version": "OWASP_CRS/4.28.0",
+            "status": "Blocked",
+        }
+        Attack.objects.create(
+            **common,
+            country="-",
+            flag="-",
+            transaction_id="transaction-one",
+        )
+
+        self.assertTrue(
+            _attack_already_seen(
+                "transaction-one",
+                **common,
+            )
+        )
+        self.assertFalse(
+            _attack_already_seen(
+                "transaction-two",
+                **common,
+            )
+        )

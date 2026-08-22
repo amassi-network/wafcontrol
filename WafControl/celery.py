@@ -14,13 +14,13 @@ app.conf.beat_schedule = {
         "schedule": crontab(minute="*/1"),
     },
     # Separate schedules; each task self-skips if server kind mismatches.
-    "update-waf-attacks-apache-every-1-minute": {
+    "update-waf-attacks-apache-stream": {
         "task": "wafinstaller.tasks.update_waf_attacks_apache",
-        "schedule": crontab(minute="*/1"),
+        "schedule": 10.0,
     },
-    "update-waf-attacks-nginx-every-1-minute": {
+    "update-waf-attacks-nginx-stream": {
         "task": "wafinstaller.tasks.update_waf_attacks_nginx",
-        "schedule": crontab(minute="*/1"),
+        "schedule": 10.0,
     },
     "delete-old-attacks-daily": {
         "task": "wafinstaller.tasks.delete_old_attacks",
