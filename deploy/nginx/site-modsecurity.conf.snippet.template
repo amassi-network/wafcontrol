@@ -1,0 +1,4 @@
+# Add these directives to every HTTPS application server block protected by WAFControl.
+modsecurity on;
+modsecurity_rules_file /etc/nginx/modsec/main.conf;
+modsecurity_transaction_id "$request_id";

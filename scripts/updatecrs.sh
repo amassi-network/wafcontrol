@@ -152,14 +152,20 @@ MAIN_CONF_EXISTED=0
 if [[ -f "$MAIN_CONF" ]]; then
   cp -a "$MAIN_CONF" "$CONF_BACKUP"
   MAIN_CONF_EXISTED=1
-  sed '/Include .*crs-setup.conf/d; /Include .*rules\/\*.conf/d' "$MAIN_CONF" > "$CONF_CANDIDATE"
-else
-  : > "$CONF_CANDIDATE"
 fi
-{
-  echo "Include $TARGET_DIR/crs-setup.conf"
-  echo "Include $TARGET_DIR/rules/*.conf"
-} >> "$CONF_CANDIDATE"
+if [[ "$SERVER" == "nginx" ]]; then
+  WAFCONTROL_POLICY_DIR="${WAFCONTROL_POLICY_DIR:-/etc/nginx/modsec/wafcontrol}" \
+    "$(dirname "$0")/render_nginx_crs_main.sh" \
+    "$MAIN_CONF" "$TARGET_DIR" "$CONF_CANDIDATE"
+else
+  if [[ -f "$MAIN_CONF" ]]; then
+    sed '/Include .*crs-setup.conf/d; /Include .*rules\/\*.conf/d' "$MAIN_CONF" > "$CONF_CANDIDATE"
+  else
+    : > "$CONF_CANDIDATE"
+  fi
+  printf 'Include %s/crs-setup.conf\nInclude %s/rules/*.conf\n' \
+    "$TARGET_DIR" "$TARGET_DIR" >> "$CONF_CANDIDATE"
+fi
 cp "$CONF_CANDIDATE" "$MAIN_CONF"
 
 rollback_main_conf() {

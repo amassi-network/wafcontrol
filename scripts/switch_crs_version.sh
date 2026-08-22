@@ -137,15 +137,9 @@ rollback() {
 }
 
 if [[ "$SERVER" == "nginx" ]]; then
-  if [[ -f "$MAIN_CONF" ]]; then
-    sed '/Include .*crs-setup\.conf/d; /Include .*rules\/\*\.conf/d' "$MAIN_CONF" > "$TMP_DIR/main.conf.candidate"
-  else
-    : > "$TMP_DIR/main.conf.candidate"
-  fi
-  {
-    echo "Include $TARGET_DIR/crs-setup.conf"
-    echo "Include $TARGET_DIR/rules/*.conf"
-  } >> "$TMP_DIR/main.conf.candidate"
+  WAFCONTROL_POLICY_DIR="${WAFCONTROL_POLICY_DIR:-/etc/nginx/modsec/wafcontrol}" \
+    "$(dirname "$0")/render_nginx_crs_main.sh" \
+    "$MAIN_CONF" "$TARGET_DIR" "$TMP_DIR/main.conf.candidate"
   cp "$TMP_DIR/main.conf.candidate" "$MAIN_CONF"
 else
   mkdir -p "$(dirname "$CRS_CURRENT")"

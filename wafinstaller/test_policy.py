@@ -1,3 +1,4 @@
+import os
 import subprocess
 import syslog
 from hashlib import sha256
@@ -822,3 +823,146 @@ class SyslogAttackDeduplicationTests(TestCase):
                 **common,
             )
         )
+
+
+class NginxCrsIncludeOrderTests(SimpleTestCase):
+    def test_renderer_keeps_managed_files_around_crs(self):
+        script = (
+            Path(__file__).resolve().parents[1] / "scripts" / "render_nginx_crs_main.sh"
+        )
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            policy_dir = root / "policy"
+            policy_dir.mkdir()
+            before = policy_dir / "REQUEST-890-WAFCONTROL-BEFORE.conf"
+            after = policy_dir / "RESPONSE-990-WAFCONTROL-AFTER.conf"
+            before.touch()
+            after.touch()
+            current = root / "main.conf"
+            output = root / "candidate.conf"
+            old_crs = root / "coreruleset-4.28.0"
+            new_crs = root / "coreruleset-4.29.0"
+            current.write_text(
+                "Include /etc/nginx/modsec/modsecurity.conf\n"
+                "Include /etc/nginx/modsec/site-before-crs.conf\n"
+                f"Include {before}\n"
+                f"Include {after}\n"
+                f"Include {old_crs}/crs-setup.conf\n"
+                f"Include {old_crs}/rules/*.conf\n"
+            )
+
+            result = subprocess.run(
+                [str(script), str(current), str(new_crs), str(output)],
+                env={
+                    **os.environ,
+                    "WAFCONTROL_POLICY_DIR": str(policy_dir),
+                },
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            lines = output.read_text().splitlines()
+            self.assertLess(
+                lines.index(f"Include {before}"),
+                lines.index(f"Include {new_crs}/crs-setup.conf"),
+            )
+            self.assertLess(
+                lines.index(f"Include {new_crs}/rules/*.conf"),
+                lines.index(f"Include {after}"),
+            )
+            self.assertNotIn(str(old_crs), output.read_text())
+
+
+class DeploymentConfigRendererTests(SimpleTestCase):
+    def setUp(self):
+        self.script = (
+            Path(__file__).resolve().parents[1]
+            / "scripts"
+            / "render_deployment_config.sh"
+        )
+        self.site_environment = {
+            **os.environ,
+            "WAF_DOMAIN": "waf.example.net",
+            "WAF_PUBLIC_IP": "192.0.2.10",
+            "WAF_ADMIN_ALLOW_IP": "198.51.100.8/32",
+            "WAF_CRS_VERSION": "4.29.0",
+            "WAF_MAPATTACK_HOST": "192.0.2.20",
+            "WAF_MAPATTACK_PORT": "514",
+        }
+
+    def test_renderer_produces_complete_site_bundle(self):
+        with TemporaryDirectory() as directory:
+            output = Path(directory) / "rendered"
+            result = subprocess.run(
+                [str(self.script), str(output)],
+                env=self.site_environment,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            expected = {
+                "wafcontrol.env",
+                "modsecurity/main.conf",
+                "modsecurity/site-before-crs.conf",
+                "nginx/site-modsecurity.conf.snippet",
+                "nginx/wafcontrol-admin.conf",
+                "rsyslog/60-wafcontrol-mapattack.conf",
+                "systemd/wafcontrol.service",
+                "systemd/wafcontrol-celery-worker.service",
+                "systemd/wafcontrol-celery-beat.service",
+                "systemd/wafcontrol-backup.service",
+                "systemd/wafcontrol-backup.timer",
+            }
+            self.assertEqual(
+                expected,
+                {
+                    str(path.relative_to(output))
+                    for path in output.rglob("*")
+                    if path.is_file()
+                },
+            )
+            rendered = "\n".join(
+                path.read_text() for path in output.rglob("*") if path.is_file()
+            )
+            self.assertNotIn("@@", rendered)
+            self.assertIn("allow 198.51.100.8/32;", rendered)
+            self.assertIn('target="192.0.2.20"', rendered)
+            includes = (output / "modsecurity" / "main.conf").read_text().splitlines()
+            self.assertLess(
+                includes.index(
+                    "Include /etc/nginx/modsec/wafcontrol/"
+                    "REQUEST-890-WAFCONTROL-BEFORE.conf"
+                ),
+                includes.index(
+                    "Include /etc/nginx/modsec/coreruleset-4.29.0/crs-setup.conf"
+                ),
+            )
+            self.assertLess(
+                includes.index(
+                    "Include /etc/nginx/modsec/coreruleset-4.29.0/rules/*.conf"
+                ),
+                includes.index(
+                    "Include /etc/nginx/modsec/wafcontrol/"
+                    "RESPONSE-990-WAFCONTROL-AFTER.conf"
+                ),
+            )
+            self.assertEqual((output / "wafcontrol.env").stat().st_mode & 0o777, 0o600)
+
+    def test_renderer_refuses_missing_required_input(self):
+        environment = self.site_environment.copy()
+        environment.pop("WAF_ADMIN_ALLOW_IP")
+        with TemporaryDirectory() as directory:
+            result = subprocess.run(
+                [str(self.script), str(Path(directory) / "rendered")],
+                env=environment,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("WAF_ADMIN_ALLOW_IP", result.stderr)

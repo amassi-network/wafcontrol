@@ -134,6 +134,12 @@ Dashboard sources live in `frontend/static`; collected files are written to
 
 
 
+## Production deployment
+
+For a reproducible Nginx, ModSecurity, CRS, PostgreSQL, Celery and MapAttack deployment, use the standalone [deployment runbook](docs/operations/DEPLOYMENT.md). Operators and automation agents should also follow the [agent handoff checklist](docs/operations/AGENT_HANDOFF.md). The [sanitised Ironitia inventory](docs/operations/PRODUCTION_INVENTORY_IRONITIA.md) records the validated reference topology without secrets.
+
+Render a site-specific, secret-free configuration bundle with `scripts/render_deployment_config.sh`; do not copy Ironitia addresses or exclusions to another site.
+
 ## WAFControl Features
 
 
@@ -152,11 +158,7 @@ section A and stored with the alert. Re-reading a transaction does not emit it
 again, while an identical signature in a new transaction remains a new event.
 The collection jobs run every ten seconds.
 
-The example `deploy/rsyslog-wafcontrol-mapattack.conf` forwards only this
-program over RFC3164/TCP to `46.28.168.76:514`, using a disk-assisted queue.
-Install it in `/etc/rsyslog.d/60-wafcontrol-mapattack.conf`, validate with
-`rsyslogd -N1`, and restart rsyslog. Change the target in that file for another
-MapAttack collector.
+The generic template `deploy/rsyslog-wafcontrol-mapattack.conf.template` forwards only this program over RFC3164/TCP using a disk-assisted queue. Render it with `scripts/render_deployment_config.sh`, install the result in `/etc/rsyslog.d/60-wafcontrol-mapattack.conf`, validate with `rsyslogd -N1`, and restart rsyslog.
 
 - **Attack Control**:  
   - Real-time logging of attacks with detailed insights. 

@@ -1,0 +1,23 @@
+# RFC3164/TCP forwarding for WAFControl events only.
+template(
+    name="WafControlMapAttackFormat"
+    type="string"
+    string="<%pri%>%timegenerated:::date-rfc3164% @@SENSOR_IP@@ %syslogtag%%msg%\n"
+)
+
+if ($programname == "wafcontrol") then {
+    action(
+        type="omfwd"
+        target="@@MAPATTACK_HOST@@"
+        port="@@MAPATTACK_PORT@@"
+        protocol="tcp"
+        TCP_Framing="traditional"
+        template="WafControlMapAttackFormat"
+        action.resumeRetryCount="-1"
+        queue.type="LinkedList"
+        queue.filename="wafcontrol_mapattack"
+        queue.saveOnShutdown="on"
+        queue.maxDiskSpace="256m"
+    )
+    stop
+}
