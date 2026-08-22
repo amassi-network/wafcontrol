@@ -15,7 +15,7 @@ This is an inventory, not a generic install script. Use
 | Application checkout | `/opt/WafControl` |
 | Dashboard | `https://ironitia.com:7000/` |
 | Allowed dashboard source | `2.136.9.164` |
-| Production code revision | `de77e73` |
+| Production code revision | `1a2f197` |
 | Protected web server | Nginx |
 | ModSecurity mode | `DetectionOnly` |
 | Active CRS | 4.29.0 |
@@ -35,6 +35,7 @@ are intentionally omitted.
 - libmodsecurity 3.0.12 (`libmodsecurity3t64`)
 - Python 3.12.3
 - Django 5.2.8
+- Yubico fido2 2.2.1
 - Celery 5.3.0
 - PostgreSQL 16.15
 - Redis 7.0.15
@@ -168,3 +169,22 @@ journalctl -u wafcontrol -u wafcontrol-celery-worker \
 
 Never include `.env`, private keys, database passwords, session cookies or
 unredacted personal data in evidence.
+
+## WebAuthn and YubiKey
+
+YubiKey/FIDO2 support was deployed on 2026-08-22 from code revision
+`1a2f197`.
+
+- server library: Yubico `fido2 2.2.1`;
+- database migration: `wafinstaller.0007_webauthncredential`;
+- relying-party ID: `ironitia.com`;
+- exact allowed origin: `https://ironitia.com:7000`;
+- challenge lifetime: 300 seconds;
+- profile tab and password-plus-security-key login endpoints active;
+- external CSRF test returned HTTP 403;
+- no credential was registered at the end of deployment validation.
+
+The operator must enrol the first physical key interactively from the
+allow-listed administrator address. Keep TOTP enabled or enrol a second key
+before testing recovery from loss of the primary key. See
+[WEBAUTHN_YUBIKEY.md](WEBAUTHN_YUBIKEY.md).

@@ -43,6 +43,7 @@ The validated production baseline on 2026-08-22 is:
 | OWASP CRS | 4.29.0, pinned |
 | Python | 3.12 |
 | Django | 5.2.8 |
+| Yubico fido2 | 2.2.1 |
 | PostgreSQL | 16 |
 | Redis | 7 |
 | rsyslog | 8.2312 |
