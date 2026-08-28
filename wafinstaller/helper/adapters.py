@@ -27,9 +27,9 @@ NGINX_PATHS = Paths(
 APACHE_PATHS = Paths(
     name="apache",
     modsec_conf="/etc/modsecurity/modsecurity.conf",
-    rules_dir_tmpl="/usr/share/modsecurity-crs-{ver}/rules",
-    custom_after_tmpl="/usr/share/modsecurity-crs-{ver}/rules/RESPONSE-999-EXCLUSION-RULES-AFTER-CRS.conf",
-    audit_log="/var/log/modsec_audit.log",
+    rules_dir_tmpl="/etc/modsecurity/crs/coreruleset-{ver}/rules",
+    custom_after_tmpl="/etc/modsecurity/wafcontrol/RESPONSE-990-WAFCONTROL-AFTER.conf",
+    audit_log="/var/log/apache2/modsec_audit.log",
     test_cmd=["apache2ctl", "configtest"],
     reload_cmd=["apache2ctl", "-k", "graceful"],
 )
@@ -64,14 +64,25 @@ def detect_crs_version():
                 return m.group(1)
     except Exception:
         pass
-    # Fallback Apache
-    try:
-        setup = os.path.realpath("/etc/modsecurity/crs-setup.conf")
-        m = re.search(r'modsecurity-crs-([0-9]+\.[0-9]+(?:\.[0-9]+)?)', setup)
+    # Fallback Apache: support both legacy symlinks and explicit active includes.
+    candidates = [os.path.realpath("/etc/modsecurity/crs-setup.conf")]
+    for path in (
+        "/etc/apache2/mods-enabled/security2.conf",
+        "/etc/apache2/mods-available/security2.conf",
+        "/etc/modsecurity/modsecurity.conf",
+    ):
+        try:
+            with open(path, "r") as f:
+                candidates.append(f.read())
+        except Exception:
+            pass
+    for candidate in candidates:
+        m = re.search(
+            r'(?:coreruleset|modsecurity-crs)[-/]([0-9]+\.[0-9]+(?:\.[0-9]+)?)',
+            candidate,
+        )
         if m:
             return m.group(1)
-    except Exception:
-        pass
     return None
 
 def rules_dir(ver: str) -> str:

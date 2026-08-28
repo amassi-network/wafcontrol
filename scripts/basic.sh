@@ -31,11 +31,26 @@ get_crs_version_nginx() {
 get_crs_version_apache() {
   local setup="/etc/modsecurity/crs-setup.conf"
   if [[ -L "$setup" ]]; then
-    readlink -f "$setup" | grep -Eo 'modsecurity-crs-([0-9]+\.[0-9]+(\.[0-9]+)?)' | sed 's/.*modsecurity-crs-//'
-    return
+    local version
+    version="$(readlink -f "$setup" | grep -Eo '(coreruleset|modsecurity-crs)-([0-9]+\.[0-9]+(\.[0-9]+)?)' | grep -Eo '[0-9]+\.[0-9]+(\.[0-9]+)?' | head -n1 || true)"
+    if [[ -n "$version" ]]; then
+      printf '%s\n' "$version"
+      return
+    fi
   fi
-  local conf="/etc/modsecurity/modsecurity.conf"
-  [[ -f "$conf" ]] && grep -Eo 'modsecurity-crs[-/][0-9]+\.[0-9]+(\.[0-9]+)?' "$conf" | head -n1 | sed -E 's/.*(modsecurity-crs[-/])//'
+
+  local conf version
+  for conf in \
+    /etc/apache2/mods-enabled/security2.conf \
+    /etc/apache2/mods-available/security2.conf \
+    /etc/modsecurity/modsecurity.conf; do
+    [[ -f "$conf" ]] || continue
+    version="$(grep -Eo '(coreruleset|modsecurity-crs)[-/][0-9]+\.[0-9]+(\.[0-9]+)?' "$conf" | grep -Eo '[0-9]+\.[0-9]+(\.[0-9]+)?' | head -n1 || true)"
+    if [[ -n "$version" ]]; then
+      printf '%s\n' "$version"
+      return
+    fi
+  done
 }
 
 NGX_VER="$(get_nginx_version || true)"

@@ -1,5 +1,6 @@
 import subprocess
 from datetime import timedelta
+from io import StringIO
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import call, patch
@@ -9,6 +10,7 @@ from django.test import Client, SimpleTestCase, TestCase
 from django.urls import reverse
 from django.utils import timezone
 
+from wafinstaller.helper.adapters import detect_crs_version
 from wafinstaller.helper.helpers import (
     compare_crs_versions,
     get_crs_version_status,
@@ -67,6 +69,20 @@ class CrsVersionHelperTests(SimpleTestCase):
 
         self.assertEqual(result.returncode, 2)
         self.assertIn("Invalid CRS version", result.stdout)
+
+    def test_detects_crs_from_active_apache_include(self):
+        def open_active_apache_config(path, *args, **kwargs):
+            if path == "/etc/apache2/mods-enabled/security2.conf":
+                return StringIO(
+                    "Include /etc/modsecurity/crs/coreruleset-4.29.0/rules/*.conf"
+                )
+            raise FileNotFoundError(path)
+
+        with patch(
+            "wafinstaller.helper.adapters._run_basic_script",
+            return_value={"server": "apache", "waf": {"version": ""}},
+        ), patch("builtins.open", side_effect=open_active_apache_config):
+            self.assertEqual(detect_crs_version(), "4.29.0")
 
 
 class CrsVersionCatalogTests(TestCase):

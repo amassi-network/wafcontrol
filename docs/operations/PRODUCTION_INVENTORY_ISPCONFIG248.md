@@ -95,10 +95,17 @@ The legacy Fail2ban `syslogger.py` action remains limited to SSH, mail and FTP b
 It is not the ModSecurity event path and must not be labelled as a WAF alert in MapAttack.
 The disabled default `apache-modsecurity` jail was not enabled.
 
+## CRS catalog and active-version detection
+
+- The catalog is refreshed from stable OWASP Core Rule Set GitHub releases.
+- Apache detection reads the effective includes in `security2.conf`, with the legacy `crs-setup.conf` symlink retained as a fallback.
+- Active CRS is `4.29.0` at `/etc/modsecurity/crs/coreruleset-4.29.0`.
+- A catalog refresh only updates WAFControl metadata; it does not switch the active CRS release.
+
 ## Validated acceptance evidence
 
 - Django migrations: successful.
-- Django tests: 74/74 passed.
+- Django tests: 75/75 passed.
 - `apache2ctl configtest`: `Syntax OK`.
 - Four reference HTTPS vhosts returned HTTP 200 before and after activation.
 - Allowed source `2.136.9.164` reached the dashboard with HTTP 200.
