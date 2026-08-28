@@ -33,6 +33,31 @@ Do not reintroduce a fixed allow-list of attack families. New CRS families and m
 
 The preferred key is `transaction_id + rule_id`. If a transaction identifier is unavailable, a five-minute signature fallback is used. Within one ingestion run, audit blocks are ordered ahead of error-log blocks so the most complete record is stored.
 
+## Transport reliability
+
+Production sends each normalized event directly to the dedicated
+`/run/wafcontrol/syslog.sock` Unix datagram input. Rsyslog creates that socket,
+enables local flow control, disables input rate limiting and routes the input to
+the MapAttack forwarding ruleset.
+
+Do not replace this path with the process-wide `syslog(3)` socket for normal
+operation. That fallback can traverse the asynchronous journald forwarding path
+and lose records during bursts. The application retains it only as a degraded
+fallback when the dedicated socket is unavailable.
+
+Keep repeated-message reduction disabled. Separate ModSecurity transactions can
+produce identical normalized messages and must not be collapsed. The remote TCP
+action uses a disk-assisted linked-list queue with infinite retries and saves its
+queue on shutdown.
+
+Validate the transport after every deployment:
+
+```bash
+test -S /run/wafcontrol/syslog.sock
+rsyslogd -N1
+journalctl -u rsyslog --since "10 minutes ago" --no-pager
+```
+
 ## Runtime counters
 
 Each Apache or Nginx Celery task reports:
@@ -68,6 +93,9 @@ Always compare:
 4. the MapAttack ingestion count.
 
 Never delete the parser checkpoint or attack table as a routine backfill mechanism.
+
+Compare events as a multiset of normalized payloads, not only as a total count.
+Repeated but legitimate alerts can otherwise hide a missing event.
 
 ## Known coverage boundary
 

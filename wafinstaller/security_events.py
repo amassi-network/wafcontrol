@@ -1,5 +1,11 @@
+import os
 import re
+import socket
 import syslog
+
+WAFCONTROL_SYSLOG_SOCKET = os.environ.get(
+    "WAFCONTROL_SYSLOG_SOCKET", "/run/wafcontrol/syslog.sock"
+)
 
 
 def _clean(value, maximum=500):
@@ -60,6 +66,16 @@ def format_attack_syslog(attack):
     )
 
 
+def _emit_to_dedicated_socket(message, syslog_priority):
+    payload = (
+        f"<{syslog.LOG_LOCAL5 | syslog_priority}>"
+        f"wafcontrol[{os.getpid()}]: {message}"
+    ).encode("utf-8", errors="replace")
+    with socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM) as transport:
+        transport.connect(WAFCONTROL_SYSLOG_SOCKET)
+        transport.sendall(payload)
+
+
 def emit_attack_syslog(attack):
     priority = attack_priority(attack)
     syslog_priority = {
@@ -67,5 +83,13 @@ def emit_attack_syslog(attack):
         2: syslog.LOG_WARNING,
         3: syslog.LOG_NOTICE,
     }[priority]
+    message = format_attack_syslog(attack)
+    if os.path.exists(WAFCONTROL_SYSLOG_SOCKET):
+        try:
+            _emit_to_dedicated_socket(message, syslog_priority)
+            return "dedicated"
+        except OSError:
+            pass
     syslog.openlog("wafcontrol", syslog.LOG_PID, syslog.LOG_LOCAL5)
-    syslog.syslog(syslog_priority, format_attack_syslog(attack))
+    syslog.syslog(syslog_priority, message)
+    return "system"

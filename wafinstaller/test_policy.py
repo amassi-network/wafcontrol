@@ -796,9 +796,10 @@ class SyslogSecurityEventTests(SimpleTestCase):
             "{TCP} 34.34.254.214:4575 -> 46.28.168.244:443",
         )
 
+    @patch("wafinstaller.security_events.os.path.exists", return_value=False)
     @patch("wafinstaller.security_events.syslog.syslog")
     @patch("wafinstaller.security_events.syslog.openlog")
-    def test_emits_each_alert_to_local5_syslog(self, openlog, send):
+    def test_emits_each_alert_to_local5_syslog(self, openlog, send, _exists):
         attack = self._attack(status="High", severity=2)
 
         emit_attack_syslog(attack)
@@ -810,6 +811,20 @@ class SyslogSecurityEventTests(SimpleTestCase):
         )
         send.assert_called_once()
         self.assertEqual(send.call_args.args[0], syslog.LOG_WARNING)
+
+    @patch("wafinstaller.security_events.os.path.exists", return_value=True)
+    @patch("wafinstaller.security_events.socket.socket")
+    def test_emits_over_dedicated_flow_control_socket(self, socket_factory, _exists):
+        attack = self._attack(status="High", severity=2)
+
+        result = emit_attack_syslog(attack)
+
+        transport = socket_factory.return_value.__enter__.return_value
+        self.assertEqual(result, "dedicated")
+        transport.connect.assert_called_once_with("/run/wafcontrol/syslog.sock")
+        payload = transport.sendall.call_args.args[0]
+        self.assertTrue(payload.startswith(b"<172>wafcontrol["))
+        self.assertIn(b"[1:942100:1] MODSEC", payload)
 
     def test_classifies_by_crs_family_before_transaction_tags(self):
         attack = self._attack(

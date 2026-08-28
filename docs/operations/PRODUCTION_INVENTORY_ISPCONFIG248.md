@@ -51,6 +51,7 @@ Their failure must not interrupt Apache.
 - Dashboard listener: `/etc/apache2/conf-available/wafcontrol-listen.conf`
 - Firewall policy: `/etc/nftables.d/wafcontrol-admin.nft`
 - MapAttack forwarding: `/etc/rsyslog.d/60-wafcontrol-mapattack.conf`
+- Dedicated alert socket: `/run/wafcontrol/syslog.sock`
 - Backups: `/var/backups/wafcontrol`
 
 ## Effective include order
@@ -87,8 +88,10 @@ Do not edit CRS vendor files. Keep exclusions in the WAFControl-owned BEFORE/AFT
 
 ## Alert transport
 
-WAFControl emits one RFC3164-compatible `local5` event per newly persisted CRS hit.
-Rsyslog forwards only program name `wafcontrol` over TCP and uses a disk-assisted queue.
+WAFControl emits one RFC3164-compatible `local5` event per newly persisted CRS hit
+to `/run/wafcontrol/syslog.sock`. Rsyslog owns this flow-controlled input, disables
+input rate limiting and repeated-message reduction, then forwards over TCP using a
+disk-assisted queue. The normal system logger remains a degraded fallback only.
 Normal detection-to-send latency is 0–10 seconds plus processing and network delay.
 
 The legacy Fail2ban `syslogger.py` action remains limited to SSH, mail and FTP bans.
@@ -111,7 +114,7 @@ Operational counters and the safe backfill procedure are documented in
 ## Validated acceptance evidence
 
 - Django migrations: successful.
-- Django tests: 77/77 passed.
+- Django tests: 78/78 passed.
 - `apache2ctl configtest`: `Syntax OK`.
 - Four reference HTTPS vhosts returned HTTP 200 before and after activation.
 - Allowed source `2.136.9.164` reached the dashboard with HTTP 200.
@@ -119,6 +122,9 @@ Operational counters and the safe backfill procedure are documented in
 - A DetectionOnly XSS probe produced CRS rules 941100, 941110, 941160 and 941390.
 - WAFControl stored the true source/destination IP addresses and ports, host and method.
 - MapAttack received the four events over TCP.
+- An exhaustive payload multiset comparison matched all 271 WAFControl database
+  alerts to receiver records after backfill; dedicated-socket burst tests delivered
+  5/5 and 20/20 messages.
 - The temporary deployment test rule was removed.
 
 Two old Apache workers logged `SIGSEGV` while the module was loaded for the first time.

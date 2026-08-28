@@ -38,7 +38,8 @@ ambiguous, stop before mutation.
 - [ ] Add ModSecurity to each approved protected HTTPS server block.
 - [ ] Install TLS dashboard vhost and restrict TCP 7000 in Nginx and firewall.
 - [ ] Install/enable Gunicorn, Celery worker, Celery beat and dependencies.
-- [ ] Install rsyslog TCP forwarding and validate its persistent queue.
+- [ ] Install the dedicated rsyslog Unix socket, TCP forwarding and persistent queue.
+- [ ] Prove repeated-message reduction is disabled and burst delivery is lossless.
 - [ ] Install/run/check the database and code backup timer.
 - [ ] Run every acceptance test in the runbook.
 - [ ] Record the exact deployed revision and sanitised evidence.
@@ -54,7 +55,7 @@ Do not reload or continue if:
 - port 7000 is reachable from an unauthorised external source;
 - the site already uses an unmanaged conflicting WAF;
 - a proposed exclusion disables a broad route/site without owner approval;
-- MapAttack maps the tuple into wrong fields;
+- MapAttack maps the tuple into wrong fields or loses any event in a burst;
 - backup creation or restore verification has not succeeded;
 - secrets appear in Git, logs, rendered evidence or command history.
 
@@ -71,7 +72,7 @@ Return a concise deployment report containing:
 - service state and `nginx -t` result;
 - allowed-source dashboard result and denied-source result;
 - one TEST-NET WAF transaction ID and database tuple;
-- corresponding MapAttack receipt and parsed tuple;
+- corresponding MapAttack receipt, parsed tuple and burst-delivery count;
 - backup filename/checksum and timer next-run time;
 - ModSecurity mode, CRS version and planned observation end date;
 - deviations, known gaps and exact rollback point.

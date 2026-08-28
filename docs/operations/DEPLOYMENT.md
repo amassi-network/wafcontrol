@@ -325,10 +325,15 @@ sudo install -o root -g root -m 0644 \
   /etc/rsyslog.d/60-wafcontrol-mapattack.conf
 sudo rsyslogd -N1
 sudo systemctl restart rsyslog
+sudo stat /run/wafcontrol/syslog.sock
 ```
 
-Newly persisted events are emitted to local syslog immediately by the Celery
-parser. Audit-log polling runs every 10 seconds, so normal detection-to-send
+Newly persisted events are emitted by the Celery parser to the dedicated
+`/run/wafcontrol/syslog.sock` input. This avoids the asynchronous
+journald-to-syslog forwarding path, while `FlowControl="on"` prevents a local
+burst from overrunning rsyslog. Repeated-message reduction must remain disabled
+for this action because distinct transactions can have identical payloads.
+Audit-log polling runs every 10 seconds, so normal detection-to-send
 latency is approximately 0–10 seconds plus processing/network delay. The
 format is RFC3164/TCP:
 
