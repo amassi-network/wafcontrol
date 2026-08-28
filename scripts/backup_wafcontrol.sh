@@ -27,15 +27,19 @@ fi
   exit 1
 }
 
-set -a
-# The root-owned deployment environment is trusted input.
-. "$ENV_FILE"
-set +a
+read_env_value() {
+  local name="$1"
+  local line
+  line="$(grep -m1 -E "^${name}=" "$ENV_FILE" || true)"
+  printf '%s' "${line#*=}"
+}
 for name in DB_NAME DB_USER DB_PASS DB_HOST DB_PORT; do
-  [[ -n "${!name:-}" ]] || {
+  value="$(read_env_value "$name")"
+  [[ -n "$value" ]] || {
     echo "[x] Missing $name in $ENV_FILE" >&2
     exit 1
   }
+  printf -v "$name" '%s' "$value"
 done
 
 install -d -o root -g root -m 0700 "$BACKUP_DIR"
@@ -57,8 +61,12 @@ tar \
 config_paths=()
 for path in \
   /etc/nginx \
+  /etc/apache2 \
+  /etc/modsecurity \
+  /etc/nftables.d/wafcontrol-admin.nft \
   /etc/rsyslog.d/60-wafcontrol-mapattack.conf \
   /etc/systemd/system/wafcontrol.service \
+  /etc/systemd/system/wafcontrol-firewall.service \
   /etc/systemd/system/wafcontrol-celery-worker.service \
   /etc/systemd/system/wafcontrol-celery-beat.service \
   /etc/systemd/system/wafcontrol-backup.service \
