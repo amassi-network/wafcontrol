@@ -47,6 +47,7 @@ Their failure must not interrupt Apache.
 - WAFControl AFTER policy: `/etc/modsecurity/wafcontrol/RESPONSE-990-WAFCONTROL-AFTER.conf`
 - Apache include owner: `/etc/apache2/mods-available/security2.conf`
 - Audit log: `/var/log/apache2/modsec_audit.log`
+- ISPConfig administration vhost: `/etc/apache2/sites-available/ispconfig.vhost`
 - Dashboard vhost: `/etc/apache2/sites-available/wafcontrol-admin.conf`
 - Dashboard listener: `/etc/apache2/conf-available/wafcontrol-listen.conf`
 - Firewall policy: `/etc/nftables.d/wafcontrol-admin.nft`
@@ -78,13 +79,31 @@ Do not edit CRS vendor files. Keep exclusions in the WAFControl-owned BEFORE/AFT
 
 ## Security decisions
 
-- The dashboard vhost has `SecRuleEngine Off` to avoid a management lockout.
+- The ISPConfig administration vhost on TCP/8080 explicitly uses `SecRuleEngine DetectionOnly`; its requests are observed but never blocked.
+- The WAFControl dashboard vhost on TCP/7000 keeps `SecRuleEngine Off` to avoid a management lockout.
 - Apache applies `Require ip 2.136.9.164`.
 - nftables drops all other IPv4 sources and all IPv6 traffic to TCP/7000.
 - TLS uses the existing valid `*.w3tel.net` certificate managed for ISPConfig.
 - Django forces HTTPS and sends HSTS for this origin.
 - HSTS `includeSubDomains` and preload stay disabled because the certificate domain is shared by unrelated services.
 - Audit parts are `ABFHZ`; raw audit records stay local and only normalized alerts are sent to MapAttack.
+
+## ISPConfig control-panel observation
+
+Activate observation on TCP/8080 without enabling blocking:
+
+```bash
+sudo cp --preserve=all /etc/apache2/sites-available/ispconfig.vhost \
+  /var/backups/wafcontrol/ispconfig.vhost.pre-detectiononly
+sudo sed -i "s/^[[:space:]]*SecRuleEngine Off/    SecRuleEngine DetectionOnly/" \
+  /etc/apache2/sites-available/ispconfig.vhost
+sudo apache2ctl configtest
+sudo systemctl reload apache2
+grep -n "SecRuleEngine DetectionOnly" \
+  /etc/apache2/sites-enabled/000-ispconfig.vhost
+```
+
+A safe validation request must generate audit events while returning the normal application response rather than HTTP 403. Keep the control panel in `DetectionOnly` throughout the observation and exclusion-review period. Do not apply this change to the WAFControl TCP/7000 vhost.
 
 ## Alert transport
 
@@ -120,6 +139,7 @@ Operational counters and the safe backfill procedure are documented in
 - Allowed source `2.136.9.164` reached the dashboard with HTTP 200.
 - A local unauthorized source was dropped by nftables (`HTTP 000`).
 - A DetectionOnly XSS probe produced CRS rules 941100, 941110, 941160 and 941390.
+- The ISPConfig TCP/8080 probe produced CRS rules 913100 and 920350, reached an inbound anomaly score of 8, and remained unblocked as designed.
 - WAFControl stored the true source/destination IP addresses and ports, host and method.
 - MapAttack received the four events over TCP.
 - An exhaustive payload multiset comparison matched all 271 WAFControl database
@@ -135,6 +155,9 @@ Monitor this counter during the observation window; disable `security2` and rest
 
 Pre-change configuration backup: `/root/pre-wafcontrol-20260828T140414Z`.
 First verified application backup checksum file: `/var/backups/wafcontrol/wafcontrol-20260828T141907Z.sha256`.
+The pre-activation ISPConfig vhost is preserved at `/var/backups/wafcontrol/ispconfig.vhost.pre-detectiononly-20260828`.
+
+ISPConfig upgrades may replace `/etc/apache2/sites-available/ispconfig.vhost`. After every ISPConfig update, verify that the TCP/8080 vhost still contains `SecRuleEngine DetectionOnly`, run `apache2ctl configtest`, and repeat the non-blocking probe.
 
 Fast WAF rollback, without removing WAFControl data:
 

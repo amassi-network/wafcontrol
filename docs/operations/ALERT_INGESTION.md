@@ -99,4 +99,4 @@ Repeated but legitimate alerts can otherwise hide a missing event.
 
 ## Known coverage boundary
 
-The ISPConfig administration vhost and the WAFControl administration vhost intentionally use `SecRuleEngine Off`. Requests to those management interfaces are outside this ModSecurity alert stream and must be covered by access control, firewall logging and authentication monitoring.
+The ISPConfig administration vhost on TCP/8080 explicitly uses `SecRuleEngine DetectionOnly` and is part of the ModSecurity alert stream. The WAFControl administration vhost on TCP/7000 intentionally keeps `SecRuleEngine Off` and must remain covered by its IP allow-list, firewall logging and authentication monitoring. Recheck the ISPConfig directive after every ISPConfig upgrade because that package may replace its generated vhost.
