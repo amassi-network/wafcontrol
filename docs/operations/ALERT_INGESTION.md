@@ -36,7 +36,7 @@ The preferred key is `transaction_id + rule_id`. If a transaction identifier is 
 ## Transport reliability
 
 Production sends each normalized event directly to the dedicated
-`/run/wafcontrol/syslog.sock` Unix datagram input. Rsyslog creates that socket,
+`/run/wafcontrol-rsyslog/syslog.sock` Unix datagram input. Rsyslog creates that socket,
 enables local flow control, disables input rate limiting and routes the input to
 the MapAttack forwarding ruleset.
 
@@ -53,7 +53,7 @@ queue on shutdown.
 Validate the transport after every deployment:
 
 ```bash
-test -S /run/wafcontrol/syslog.sock
+test -S /run/wafcontrol-rsyslog/syslog.sock
 rsyslogd -N1
 journalctl -u rsyslog --since "10 minutes ago" --no-pager
 ```

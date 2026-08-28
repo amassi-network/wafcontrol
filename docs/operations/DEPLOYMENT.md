@@ -325,11 +325,11 @@ sudo install -o root -g root -m 0644 \
   /etc/rsyslog.d/60-wafcontrol-mapattack.conf
 sudo rsyslogd -N1
 sudo systemctl restart rsyslog
-sudo stat /run/wafcontrol/syslog.sock
+sudo stat /run/wafcontrol-rsyslog/syslog.sock
 ```
 
 Newly persisted events are emitted by the Celery parser to the dedicated
-`/run/wafcontrol/syslog.sock` input. This avoids the asynchronous
+`/run/wafcontrol-rsyslog/syslog.sock` input. This avoids the asynchronous
 journald-to-syslog forwarding path, while `FlowControl="on"` prevents a local
 burst from overrunning rsyslog. Repeated-message reduction must remain disabled
 for this action because distinct transactions can have identical payloads.

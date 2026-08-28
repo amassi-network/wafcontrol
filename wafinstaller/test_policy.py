@@ -821,7 +821,7 @@ class SyslogSecurityEventTests(SimpleTestCase):
 
         transport = socket_factory.return_value.__enter__.return_value
         self.assertEqual(result, "dedicated")
-        transport.connect.assert_called_once_with("/run/wafcontrol/syslog.sock")
+        transport.connect.assert_called_once_with("/run/wafcontrol-rsyslog/syslog.sock")
         payload = transport.sendall.call_args.args[0]
         self.assertTrue(payload.startswith(b"<172>wafcontrol["))
         self.assertIn(b"[1:942100:1] MODSEC", payload)

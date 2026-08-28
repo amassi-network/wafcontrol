@@ -51,7 +51,7 @@ Their failure must not interrupt Apache.
 - Dashboard listener: `/etc/apache2/conf-available/wafcontrol-listen.conf`
 - Firewall policy: `/etc/nftables.d/wafcontrol-admin.nft`
 - MapAttack forwarding: `/etc/rsyslog.d/60-wafcontrol-mapattack.conf`
-- Dedicated alert socket: `/run/wafcontrol/syslog.sock`
+- Dedicated alert socket: `/run/wafcontrol-rsyslog/syslog.sock`
 - Backups: `/var/backups/wafcontrol`
 
 ## Effective include order
@@ -89,7 +89,7 @@ Do not edit CRS vendor files. Keep exclusions in the WAFControl-owned BEFORE/AFT
 ## Alert transport
 
 WAFControl emits one RFC3164-compatible `local5` event per newly persisted CRS hit
-to `/run/wafcontrol/syslog.sock`. Rsyslog owns this flow-controlled input, disables
+to `/run/wafcontrol-rsyslog/syslog.sock`. Rsyslog owns this flow-controlled input, disables
 input rate limiting and repeated-message reduction, then forwards over TCP using a
 disk-assisted queue. The normal system logger remains a degraded fallback only.
 Normal detection-to-send latency is 0–10 seconds plus processing and network delay.

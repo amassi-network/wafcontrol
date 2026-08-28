@@ -4,7 +4,7 @@ import socket
 import syslog
 
 WAFCONTROL_SYSLOG_SOCKET = os.environ.get(
-    "WAFCONTROL_SYSLOG_SOCKET", "/run/wafcontrol/syslog.sock"
+    "WAFCONTROL_SYSLOG_SOCKET", "/run/wafcontrol-rsyslog/syslog.sock"
 )
 
 

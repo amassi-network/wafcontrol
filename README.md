@@ -148,7 +148,7 @@ Render a site-specific, secret-free configuration bundle with `scripts/render_de
 ### Real-time Syslog security events
 
 Every newly persisted ModSecurity alert is emitted immediately to the dedicated
-`/run/wafcontrol/syslog.sock` Unix socket with ident `wafcontrol` and
+`/run/wafcontrol-rsyslog/syslog.sock` Unix socket with ident `wafcontrol` and
 facility `local5`. Rsyslog applies flow control locally, disables repeated
 message reduction for this action, and forwards over queued RFC3164/TCP. The
 message body is intentionally compatible with the common Snort alert shape:
