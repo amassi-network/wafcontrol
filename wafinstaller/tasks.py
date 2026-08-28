@@ -199,31 +199,51 @@ def _update_waf_attacks_core(mod, backend: str) -> str:
         except Exception:
             pass
 
-    AUDIT_LOG = next((p for p in AUDIT_CANDIDATES if os.path.exists(p)), None)
-    ERROR_LOGS = [p for p in ERROR_CANDIDATES if os.path.exists(p)]
-    ACCESS_LOGS = [p for p in ACCESS_CANDIDATES if os.path.exists(p)]
+    try:
+        discovered = mod.discover_all_paths()
+    except Exception:
+        discovered = {}
+
+    def existing_unique(paths):
+        return list(dict.fromkeys(p for p in paths if p and os.path.exists(p)))
+
+    AUDIT_LOGS = existing_unique(AUDIT_CANDIDATES + discovered.get("audit_files", []))
+    AUDIT_DIRS = existing_unique(discovered.get("audit_dirs", []))
+    ERROR_LOGS = existing_unique(ERROR_CANDIDATES + discovered.get("error_logs", []))
+    ACCESS_LOGS = existing_unique(ACCESS_CANDIDATES + discovered.get("access_logs", []))
 
     created = 0
+    duplicates = 0
+    raw_rule_hits = 0
+    suppressed_hits = 0
+    invalid_source = 0
+    skipped_request = 0
+    ingest_errors = 0
     ckpt = load_ckpt()
 
     try:
-        blocks = []
-        if AUDIT_LOG:
-            blocks = mod.read_audit_blocks_serial_without_z(
-                AUDIT_LOG, max_bytes=8000000
+        audit_blocks = []
+        for audit_log in AUDIT_LOGS:
+            current = mod.read_audit_blocks_serial_without_z(
+                audit_log, max_bytes=8000000
+            )
+            if not current:
+                current = mod.parse_audit_blocks_incremental(
+                    audit_log, ckpt, max_tail_bytes=2000000, max_blocks_on_rotate=400
+                )
+            audit_blocks.extend(current)
+
+        for audit_dir in AUDIT_DIRS:
+            audit_blocks.extend(
+                mod.read_concurrent_audit_dir(audit_dir, ckpt, max_new=400)
             )
 
-        if not blocks and AUDIT_LOG:
-            blocks = mod.parse_audit_blocks_incremental(
-                AUDIT_LOG, ckpt, max_tail_bytes=2000000, max_blocks_on_rotate=400
-            )
+        error_blocks = mod.blocks_from_errorlogs(ERROR_LOGS, tail_n=12000)
+        blocks = error_blocks + audit_blocks
 
-        if not blocks and ERROR_LOGS:
-            blocks = mod.blocks_from_errorlogs(ERROR_LOGS, tail_n=12000)
-
-        if not blocks and not ERROR_LOGS:
+        if not blocks:
             save_ckpt(ckpt)
-            return "no data"
+            return f"{backend}: no data"
 
         uid_to_ip = mod.map_uid_to_ip_from_errorlogs(ERROR_LOGS, 8000)
         ip_targets = mod.map_ip_to_recent_targets(ACCESS_LOGS, tail_n=20000)
@@ -248,6 +268,7 @@ def _update_waf_attacks_core(mod, backend: str) -> str:
                         break
 
             if not mod.is_ip(ip):
+                invalid_source += 1
                 continue
 
             uri = (
@@ -256,6 +277,7 @@ def _update_waf_attacks_core(mod, backend: str) -> str:
                 or ""
             )
             if not uri or mod.looks_static(uri):
+                skipped_request += 1
                 continue
 
             ver = mod.extract_first(mod.VER_RE, blk)
@@ -277,7 +299,9 @@ def _update_waf_attacks_core(mod, backend: str) -> str:
             raw_hits = mod.extract_hits_from_sections(sections) or mod.parse_rule_hits(
                 blk
             )
+            raw_rule_hits += len(raw_hits)
             hits = mod.filter_rule_hits(raw_hits)
+            suppressed_hits += len(raw_hits) - len(hits)
             if not hits:
                 continue
 
@@ -298,6 +322,7 @@ def _update_waf_attacks_core(mod, backend: str) -> str:
                     status,
                 )
                 if sig in inrun_seen:
+                    duplicates += 1
                     continue
                 inrun_seen.add(sig)
 
@@ -311,6 +336,7 @@ def _update_waf_attacks_core(mod, backend: str) -> str:
                     version=ver,
                     status=status,
                 ):
+                    duplicates += 1
                     continue
 
                 country_info = geo_cache.get(ip)
@@ -341,19 +367,30 @@ def _update_waf_attacks_core(mod, backend: str) -> str:
                     try:
                         emit_attack_syslog(attack)
                     except Exception:
+                        ingest_errors += 1
                         logger.exception(
                             "Failed to emit WAF alert %s to local syslog",
                             attack.pk,
                         )
                     created += 1
                 except IntegrityError:
+                    duplicates += 1
                     continue
                 except Exception:
+                    ingest_errors += 1
                     continue
 
         save_ckpt(ckpt)
-        return f"{backend}: created={created}"
+        summary = (
+            f"{backend}: audit_logs={len(AUDIT_LOGS)} error_logs={len(ERROR_LOGS)} "
+            f"audit_blocks={len(audit_blocks)} error_blocks={len(error_blocks)} "
+            f"raw_hits={raw_rule_hits} suppressed={suppressed_hits} "
+            f"duplicates={duplicates} invalid_source={invalid_source} "
+            f"skipped_request={skipped_request} created={created} errors={ingest_errors}"
+        )
+        logger.info("WAF ingestion %s", summary)
 
+        return summary
     finally:
         try:
             os.remove(LOCK_FILE)

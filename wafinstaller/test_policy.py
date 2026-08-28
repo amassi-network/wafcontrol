@@ -592,6 +592,44 @@ ModSecurity: Warning. Matched Data: select found within ARGS:description [id "94
                 self.assertEqual(backend.extract_first(backend.UID_RE, raw), "tx-123")
 
 
+    def test_keeps_primary_rules_and_suppresses_only_summaries(self):
+        hits = [
+            ("913100", "scanner"),
+            ("920350", "protocol"),
+            ("100001", "custom"),
+            ("949110", "inbound summary"),
+            ("959100", "outbound summary"),
+            ("980170", "correlation"),
+            ("100002", "WAFControl_deployment_probe"),
+        ]
+        expected = hits[:3]
+        for backend in (attack_apache, attack_nginx):
+            with self.subTest(backend=backend.__name__):
+                self.assertEqual(backend.filter_rule_hits(hits), expected)
+                self.assertIsNone(
+                    backend.pick_best_target("192.0.2.10", "/expected", ["/unrelated"])
+                )
+
+    def test_error_logs_are_grouped_by_transaction_with_metadata_preserved(self):
+        raw = (
+            '[security2:error] [client 192.0.2.10:4444] ModSecurity: Warning. '
+            '[id "920350"] [msg "Numeric host"] [hostname "example.test"] '
+            '[uri "/cgi-bin/test"] [unique_id "tx-error-1"]\n'
+            '[security2:error] [client 192.0.2.10:4444] ModSecurity: Warning. '
+            '[id "920420"] [msg "Invalid content type"] [hostname "example.test"] '
+            '[uri "/cgi-bin/test"] [unique_id "tx-error-1"]\n'
+        )
+        with TemporaryDirectory() as directory:
+            error_log = Path(directory) / "error.log"
+            error_log.write_text(raw)
+            for backend in (attack_apache, attack_nginx):
+                with self.subTest(backend=backend.__name__):
+                    blocks = backend.blocks_from_errorlogs([str(error_log)])
+                    self.assertEqual(len(blocks), 1)
+                    self.assertIn('[hostname "example.test"]', blocks[0])
+                    self.assertEqual(backend.extract_first(backend.UID_RE, blocks[0]), "tx-error-1")
+                    self.assertEqual(backend.IP_FALLBACKS[0].search(blocks[0]).group(1), "192.0.2.10")
+
 class StaticFilesConfigurationTests(SimpleTestCase):
     def test_static_sources_are_separate_from_collection_target(self):
         source_directory = Path(settings.STATICFILES_DIRS[0]).resolve()

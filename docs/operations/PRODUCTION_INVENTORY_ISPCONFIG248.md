@@ -95,6 +95,12 @@ The legacy Fail2ban `syslogger.py` action remains limited to SSH, mail and FTP b
 It is not the ModSecurity event path and must not be labelled as a WAF alert in MapAttack.
 The disabled default `apache-modsecurity` jail was not enabled.
 
+The collector merges the global audit log with all discovered virtual-host error logs.
+Primary rules such as CRS 913 and 920 are retained; only CRS summary/correlation
+families 949, 959 and 980 and the internal deployment probe are suppressed.
+Operational counters and the safe backfill procedure are documented in
+`docs/operations/ALERT_INGESTION.md`.
+
 ## CRS catalog and active-version detection
 
 - The catalog is refreshed from stable OWASP Core Rule Set GitHub releases.
@@ -105,7 +111,7 @@ The disabled default `apache-modsecurity` jail was not enabled.
 ## Validated acceptance evidence
 
 - Django migrations: successful.
-- Django tests: 75/75 passed.
+- Django tests: 77/77 passed.
 - `apache2ctl configtest`: `Syntax OK`.
 - Four reference HTTPS vhosts returned HTTP 200 before and after activation.
 - Allowed source `2.136.9.164` reached the dashboard with HTTP 200.
