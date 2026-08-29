@@ -94,4 +94,3 @@ whitespace checks pass.
 
 - RBAC, approvals, append-only audit review, SSO, API tokens, CLI, and GitOps;
 - rate limiting, authentication protection, bot controls, OpenAPI inventory, virtual patching, and experimental Coraza support.
-
