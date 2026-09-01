@@ -1,29 +1,73 @@
-import os
 import json
-import time
 import logging
+import os
 import subprocess
-from datetime import datetime, timedelta, timezone as pytimezone
+import time
+from datetime import datetime, timedelta
+from datetime import timezone as pytimezone
+from pathlib import Path
 from typing import Dict, List, Tuple
 
 import requests
 from celery import shared_task
-from django.db import IntegrityError
 from django.conf import settings
+from django.db import IntegrityError
 from django.utils import timezone  # <-- use Django timezone
-from pathlib import Path
 
-from .attacks.attack_nginx import determine_status
-from .models import Attack, CrsVersion, DashboardStat
-from wafinstaller.helper.utils import get_country_info
 from wafinstaller.helper.crs import load_app_settings
-from wafinstaller.helper.tasks_helpers import detect_server_kind  # ensure filename matches!
-from .attacks import attack_apache as ap_mod, attack_nginx as ngx_mod
+from wafinstaller.helper.tasks_helpers import (
+    detect_server_kind,
+)  # ensure filename matches!
+from wafinstaller.helper.utils import get_country_info
+
+from .attacks import attack_apache as ap_mod
+from .attacks import attack_nginx as ngx_mod
+from .attacks.attack_nginx import determine_status
+from .models import (
+    AddressEntry,
+    Attack,
+    AuditEntry,
+    CrsVersion,
+    DashboardStat,
+    RuleExclusion,
+)
+from .security_events import emit_attack_syslog
 
 logger = logging.getLogger(__name__)
 
 
+def _attack_already_seen(transaction_id, **fallback):
+    if transaction_id:
+        return Attack.objects.filter(
+            transaction_id=transaction_id,
+            rule_id=fallback["rule_id"],
+        ).exists()
+    cutoff = timezone.now() - timedelta(minutes=5)
+    return Attack.objects.filter(timestamp__gte=cutoff, **fallback).exists()
+
+
+def _connection_metadata(mod, sections):
+    for line in sections.get("A", []):
+        match = mod.SECTION_A_HEADER.match(line.strip())
+        if not match:
+            continue
+        destination_ip = match.group("dst")
+        return {
+            "source_port": int(match.group("src_port")),
+            "destination_ip": destination_ip if mod.is_ip(destination_ip) else None,
+            "destination_port": int(match.group("dst_port")),
+            "protocol": "TCP",
+        }
+    return {
+        "source_port": None,
+        "destination_ip": None,
+        "destination_port": None,
+        "protocol": "TCP",
+    }
+
+
 # ---------- Script path helpers ----------
+
 
 def _scripts_dir() -> Path:
 
@@ -35,6 +79,7 @@ def _scripts_dir() -> Path:
 
 
 # ---------- Streaming runner (for long-running installers) ----------
+
 
 @shared_task(bind=True)
 def run_waf_install(self):
@@ -63,6 +108,7 @@ def run_waf_install(self):
 
 
 # ---------- System stats ----------
+
 
 @shared_task
 def update_dashboard_stats():
@@ -96,15 +142,28 @@ def update_dashboard_stats():
 
 # ---------- Core updater shared by Apache/Nginx ----------
 
+
 def _update_waf_attacks_core(mod, backend: str) -> str:
     if backend == "apache":
-        AUDIT_CANDIDATES = ["/var/log/apache2/modsec_audit.log", "/var/log/modsec_audit.log"]
-        ERROR_CANDIDATES = ["/var/log/apache2/error.log", "/var/log/apache2/wafcontrol_error.log"]
-        ACCESS_CANDIDATES = ["/var/log/apache2/access.log", "/var/log/apache2/other_vhosts_access.log"]
+        AUDIT_CANDIDATES = [
+            "/var/log/apache2/modsec_audit.log",
+            "/var/log/modsec_audit.log",
+        ]
+        ERROR_CANDIDATES = [
+            "/var/log/apache2/error.log",
+            "/var/log/apache2/wafcontrol_error.log",
+        ]
+        ACCESS_CANDIDATES = [
+            "/var/log/apache2/access.log",
+            "/var/log/apache2/other_vhosts_access.log",
+        ]
         LOCK_FILE = "/tmp/update_waf_attacks_apache.lock"
         STATE_DIR = "/var/lib/wafparser/apache"
     else:
-        AUDIT_CANDIDATES = ["/var/log/nginx/modsec_audit.log", "/var/log/modsec_audit.log"]
+        AUDIT_CANDIDATES = [
+            "/var/log/nginx/modsec_audit.log",
+            "/var/log/modsec_audit.log",
+        ]
         ERROR_CANDIDATES = ["/var/log/nginx/error.log"]
         ACCESS_CANDIDATES = ["/var/log/nginx/access.log"]
         LOCK_FILE = "/tmp/update_waf_attacks_nginx.lock"
@@ -140,29 +199,51 @@ def _update_waf_attacks_core(mod, backend: str) -> str:
         except Exception:
             pass
 
-    AUDIT_LOG = next((p for p in AUDIT_CANDIDATES if os.path.exists(p)), None)
-    ERROR_LOGS = [p for p in ERROR_CANDIDATES if os.path.exists(p)]
-    ACCESS_LOGS = [p for p in ACCESS_CANDIDATES if os.path.exists(p)]
+    try:
+        discovered = mod.discover_all_paths()
+    except Exception:
+        discovered = {}
+
+    def existing_unique(paths):
+        return list(dict.fromkeys(p for p in paths if p and os.path.exists(p)))
+
+    AUDIT_LOGS = existing_unique(AUDIT_CANDIDATES + discovered.get("audit_files", []))
+    AUDIT_DIRS = existing_unique(discovered.get("audit_dirs", []))
+    ERROR_LOGS = existing_unique(ERROR_CANDIDATES + discovered.get("error_logs", []))
+    ACCESS_LOGS = existing_unique(ACCESS_CANDIDATES + discovered.get("access_logs", []))
 
     created = 0
+    duplicates = 0
+    raw_rule_hits = 0
+    suppressed_hits = 0
+    invalid_source = 0
+    skipped_request = 0
+    ingest_errors = 0
     ckpt = load_ckpt()
 
     try:
-        blocks = []
-        if AUDIT_LOG:
-            blocks = mod.read_audit_blocks_serial_without_z(AUDIT_LOG, max_bytes=8000000)
+        audit_blocks = []
+        for audit_log in AUDIT_LOGS:
+            current = mod.read_audit_blocks_serial_without_z(
+                audit_log, max_bytes=8000000
+            )
+            if not current:
+                current = mod.parse_audit_blocks_incremental(
+                    audit_log, ckpt, max_tail_bytes=2000000, max_blocks_on_rotate=400
+                )
+            audit_blocks.extend(current)
 
-        if not blocks and AUDIT_LOG:
-            blocks = mod.parse_audit_blocks_incremental(
-                AUDIT_LOG, ckpt, max_tail_bytes=2000000, max_blocks_on_rotate=400
+        for audit_dir in AUDIT_DIRS:
+            audit_blocks.extend(
+                mod.read_concurrent_audit_dir(audit_dir, ckpt, max_new=400)
             )
 
-        if not blocks and ERROR_LOGS:
-            blocks = mod.blocks_from_errorlogs(ERROR_LOGS, tail_n=12000)
+        error_blocks = mod.blocks_from_errorlogs(ERROR_LOGS, tail_n=12000)
+        blocks = error_blocks + audit_blocks
 
-        if not blocks and not ERROR_LOGS:
+        if not blocks:
             save_ckpt(ckpt)
-            return "no data"
+            return f"{backend}: no data"
 
         uid_to_ip = mod.map_uid_to_ip_from_errorlogs(ERROR_LOGS, 8000)
         ip_targets = mod.map_ip_to_recent_targets(ACCESS_LOGS, tail_n=20000)
@@ -187,24 +268,40 @@ def _update_waf_attacks_core(mod, backend: str) -> str:
                         break
 
             if not mod.is_ip(ip):
+                invalid_source += 1
                 continue
 
-            uri = mod.uri_from_B_sections(sections) or mod.extract_first(mod.URI_RE, blk) or ""
+            uri = (
+                mod.uri_from_B_sections(sections)
+                or mod.extract_first(mod.URI_RE, blk)
+                or ""
+            )
             if not uri or mod.looks_static(uri):
+                skipped_request += 1
                 continue
 
             ver = mod.extract_first(mod.VER_RE, blk)
             ref = mod.extract_first(mod.REFERER_RE, blk)
             tags = mod.extract_all(mod.TAGS_RE, blk)
+            method = mod.method_from_B_sections(sections)
+            matched_variable = mod.extract_first(mod.MATCHED_VAR_RE, blk)
+            transaction_id = uid or uid_a or ""
+            connection = _connection_metadata(mod, sections)
             blocked = mod.blocked_from_block_text(blk)
 
-            severity = mod.extract_severity_from_log(blk, mod.extract_first(mod.RID_RE, blk) or "")
+            severity = mod.extract_severity_from_log(
+                blk, mod.extract_first(mod.RID_RE, blk) or ""
+            )
             anomaly_score = mod.extract_anomaly_score(blk)
 
             status = determine_status(severity, anomaly_score, blocked)
 
-            raw_hits = mod.extract_hits_from_sections(sections) or mod.parse_rule_hits(blk)
+            raw_hits = mod.extract_hits_from_sections(sections) or mod.parse_rule_hits(
+                blk
+            )
+            raw_rule_hits += len(raw_hits)
             hits = mod.filter_rule_hits(raw_hits)
+            suppressed_hits += len(raw_hits) - len(hits)
             if not hits:
                 continue
 
@@ -216,14 +313,30 @@ def _update_waf_attacks_core(mod, backend: str) -> str:
                     full_uri = cand
 
             for rid, msg in hits:
-                sig = mod.build_sig(ip or "", f"{host}|{full_uri}" or "", rid or "", msg or "", ver or "", status)
+                sig = f"{transaction_id}|" + mod.build_sig(
+                    ip or "",
+                    f"{host}|{full_uri}" or "",
+                    rid or "",
+                    msg or "",
+                    ver or "",
+                    status,
+                )
                 if sig in inrun_seen:
+                    duplicates += 1
                     continue
                 inrun_seen.add(sig)
 
-                if Attack.objects.filter(
-                        ip=ip, uri=full_uri, host=host or None, rule_id=rid, message=msg, version=ver, status=status
-                ).exists():
+                if _attack_already_seen(
+                    transaction_id,
+                    ip=ip,
+                    uri=full_uri,
+                    host=host or None,
+                    rule_id=rid,
+                    message=msg,
+                    version=ver,
+                    status=status,
+                ):
+                    duplicates += 1
                     continue
 
                 country_info = geo_cache.get(ip)
@@ -232,7 +345,7 @@ def _update_waf_attacks_core(mod, backend: str) -> str:
                     geo_cache[ip] = country_info
 
                 try:
-                    Attack.objects.create(
+                    attack = Attack.objects.create(
                         ip=ip,
                         country=country_info.get("country", "-"),
                         flag=country_info.get("iso_code", "-"),
@@ -245,23 +358,48 @@ def _update_waf_attacks_core(mod, backend: str) -> str:
                         anomaly_score=anomaly_score,
                         version=ver or "-",
                         host=host or None,
+                        method=method,
+                        transaction_id=transaction_id,
+                        matched_variable=matched_variable,
+                        rule_tags=sorted(set(tags)),
+                        **connection,
                     )
+                    try:
+                        emit_attack_syslog(attack)
+                    except Exception:
+                        ingest_errors += 1
+                        logger.exception(
+                            "Failed to emit WAF alert %s to local syslog",
+                            attack.pk,
+                        )
                     created += 1
                 except IntegrityError:
+                    duplicates += 1
                     continue
                 except Exception:
+                    ingest_errors += 1
                     continue
 
         save_ckpt(ckpt)
-        return f"{backend}: created={created}"
+        summary = (
+            f"{backend}: audit_logs={len(AUDIT_LOGS)} error_logs={len(ERROR_LOGS)} "
+            f"audit_blocks={len(audit_blocks)} error_blocks={len(error_blocks)} "
+            f"raw_hits={raw_rule_hits} suppressed={suppressed_hits} "
+            f"duplicates={duplicates} invalid_source={invalid_source} "
+            f"skipped_request={skipped_request} created={created} errors={ingest_errors}"
+        )
+        logger.info("WAF ingestion %s", summary)
 
+        return summary
     finally:
         try:
             os.remove(LOCK_FILE)
         except Exception:
             pass
 
+
 # ---------- Per-backend public tasks ----------
+
 
 @shared_task
 def update_waf_attacks_apache():
@@ -277,7 +415,75 @@ def update_waf_attacks_nginx():
     return _update_waf_attacks_core(ngx_mod, backend="nginx")
 
 
+@shared_task
+def expire_managed_policy_objects():
+    """Disable expired policy objects while retaining their audit history."""
+    moment = timezone.now()
+    expired_entries = list(
+        AddressEntry.objects.filter(enabled=True, expires_at__lte=moment)
+    )
+    expired_exclusions = list(
+        RuleExclusion.objects.filter(enabled=True, expires_at__lte=moment)
+    )
+    entry_count = AddressEntry.objects.filter(
+        pk__in=[entry.pk for entry in expired_entries]
+    ).update(enabled=False)
+    exclusion_count = RuleExclusion.objects.filter(
+        pk__in=[item.pk for item in expired_exclusions]
+    ).update(enabled=False)
+    deployment = "not-required"
+    if entry_count or exclusion_count:
+        from wafinstaller.helper.adapters import get_paths
+        from wafinstaller.policy import (
+            PolicyDeploymentError,
+            deploy_policy_bundle,
+            include_status,
+            render_policy,
+        )
+
+        if include_status():
+            paths = get_paths()
+            try:
+                changed = deploy_policy_bundle(
+                    render_policy(),
+                    test_cmd=paths.test_cmd,
+                    reload_cmd=paths.reload_cmd,
+                )
+                deployment = "reloaded" if changed else "already-active"
+            except PolicyDeploymentError:
+                AddressEntry.objects.filter(
+                    pk__in=[entry.pk for entry in expired_entries]
+                ).update(enabled=True)
+                RuleExclusion.objects.filter(
+                    pk__in=[item.pk for item in expired_exclusions]
+                ).update(enabled=True)
+                AuditEntry.objects.create(
+                    action="policy.expiry.run",
+                    target="managed-policy",
+                    outcome=AuditEntry.Outcome.FAILED,
+                    details={
+                        "address_entries": entry_count,
+                        "rule_exclusions": exclusion_count,
+                        "deployment": "rolled-back",
+                    },
+                )
+                raise
+
+    AuditEntry.objects.create(
+        action="policy.expiry.run",
+        target="managed-policy",
+        outcome=AuditEntry.Outcome.SUCCEEDED,
+        details={
+            "address_entries": entry_count,
+            "rule_exclusions": exclusion_count,
+            "deployment": deployment,
+        },
+    )
+    return {"address_entries": entry_count, "rule_exclusions": exclusion_count}
+
+
 # ---------- Housekeeping ----------
+
 
 @shared_task
 def delete_old_attacks():
@@ -289,6 +495,7 @@ def delete_old_attacks():
 
 
 # ---------- CRS version install (stream logs) ----------
+
 
 @shared_task(bind=True)
 def run_crs_version_install(self, version: str):
@@ -316,6 +523,7 @@ def run_crs_version_install(self, version: str):
 
 # ---------- Fetch CRS versions from GitHub ----------
 
+
 @shared_task
 def fetch_crs_versions_task():
     try:
@@ -328,22 +536,35 @@ def fetch_crs_versions_task():
             url = f"https://api.github.com/repos/coreruleset/coreruleset/releases?per_page=20&page={page}"
             resp = requests.get(url, timeout=15, headers=headers)
             if resp.status_code != 200:
-                logger.error("GitHub responded with status %s: %s", resp.status_code, resp.text[:200])
+                logger.error(
+                    "GitHub responded with status %s: %s",
+                    resp.status_code,
+                    resp.text[:200],
+                )
                 break
             releases = resp.json() or []
             for r in releases:
+                if r.get("draft") or r.get("prerelease"):
+                    continue
                 tag = r.get("tag_name", "")
                 published_at = r.get("published_at", "")
                 zip_url = r.get("zipball_url", "")
                 if not tag or not published_at:
                     continue
                 # Parse to aware datetime (UTC)
-                dt = datetime.strptime(published_at, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=pytimezone.utc)
-                CrsVersion.objects.update_or_create(
+                dt = datetime.strptime(published_at, "%Y-%m-%dT%H:%M:%SZ").replace(
+                    tzinfo=pytimezone.utc
+                )
+                version, _ = CrsVersion.objects.update_or_create(
                     tag=tag,
                     defaults={"published_at": dt, "zip_url": zip_url},
                 )
+                CrsVersion.objects.filter(pk=version.pk).update(
+                    fetched_at=timezone.now()
+                )
                 all_versions.append(tag)
         logger.info("Fetched and saved %d CRS versions.", len(all_versions))
+        return all_versions
     except Exception as e:
         logger.exception("CRS Fetch Error: %s", e)
+        return []

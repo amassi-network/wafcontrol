@@ -1,0 +1,39 @@
+# RFC3164/TCP forwarding for WAFControl events only.
+# Security events must never be collapsed as "last message repeated".
+$RepeatedMsgReduction off
+
+template(
+    name="WafControlMapAttackFormat"
+    type="string"
+    string="<%pri%>%timegenerated:::date-rfc3164% @@SENSOR_IP@@ %syslogtag%%msg%\n"
+)
+
+ruleset(name="WafControlMapAttackRuleset") {
+    action(
+        type="omfwd"
+        target="@@MAPATTACK_HOST@@"
+        port="@@MAPATTACK_PORT@@"
+        protocol="tcp"
+        TCP_Framing="traditional"
+        template="WafControlMapAttackFormat"
+        action.resumeRetryCount="-1"
+        queue.type="LinkedList"
+        queue.filename="wafcontrol_mapattack"
+        queue.saveOnShutdown="on"
+        queue.maxDiskSpace="256m"
+    )
+}
+
+input(
+    type="imuxsock"
+    Socket="/run/wafcontrol-rsyslog/syslog.sock"
+    CreatePath="on"
+    FlowControl="on"
+    RateLimit.Interval="0"
+    ruleset="WafControlMapAttackRuleset"
+)
+
+if ($programname == "wafcontrol") then {
+    call WafControlMapAttackRuleset
+    stop
+}

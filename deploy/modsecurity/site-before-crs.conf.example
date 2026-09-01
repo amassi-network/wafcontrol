@@ -1,0 +1,7 @@
+# Site-specific exclusions loaded before CRS.
+# Keep this file small, reviewed and site-specific. Never copy exclusions blindly.
+#
+# Example health endpoint during an explicitly approved observation phase:
+# SecRule REQUEST_URI "@streq /api/health" "id:1000100,phase:1,nolog,pass,ctl:ruleEngine=Off"
+#
+# Do not put secrets in ModSecurity configuration or comments.

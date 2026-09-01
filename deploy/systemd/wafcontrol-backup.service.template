@@ -1,0 +1,9 @@
+[Unit]
+Description=Backup OWASP WAFControl database and application files
+After=postgresql.service
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+ExecStart=@@APP_ROOT@@/scripts/backup_wafcontrol.sh

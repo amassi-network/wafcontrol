@@ -1,0 +1,19 @@
+[Unit]
+Description=OWASP WAFControl Celery Worker
+After=network-online.target postgresql.service redis-server.service
+Wants=network-online.target
+
+[Service]
+User=@@SERVICE_USER@@
+Group=@@SERVICE_GROUP@@
+WorkingDirectory=@@APP_ROOT@@
+Environment=DJANGO_SETTINGS_MODULE=WafControl.settings
+ExecStart=@@APP_ROOT@@/venv/bin/celery -A WafControl worker --loglevel=INFO
+Restart=on-failure
+RestartSec=3
+PrivateTmp=true
+NoNewPrivileges=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+[Install]
+WantedBy=multi-user.target

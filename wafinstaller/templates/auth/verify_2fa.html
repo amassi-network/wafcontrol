@@ -1,61 +1,140 @@
 {% extends 'auth/main/main.html' %}
 {% load static %}
 {% block content %}
-    <section class="sign-in-page">
-        <div class="container p-0" id="sign-in-page-box">
+<section class="sign-in-page">
+  <div class="container p-0" id="sign-in-page-box">
+    <div class="bg-white form-container sign-in-container">
+      <div class="sign-in-page-data">
+        <div class="sign-in-from w-100 m-auto">
+          <h1 class="mb-3 text-center">Two-Factor Verification</h1>
+          {% if messages %}
+            {% for message in messages %}
+              <div class="alert alert-{{ message.tags }}">{{ message }}</div>
+            {% endfor %}
+          {% endif %}
 
-            <div class="bg-white form-container sign-in-container">
-                <div class="sign-in-page-data">
-                    <div class="sign-in-from w-100 m-auto">
-                        <h1 class="mb-3 text-center">Two-Factor Verification</h1>
-                        <p class="text-center text-dark">Enter the 6-digit code from your authenticator app.</p>
+          {% if yubikey_enabled %}
+            <p class="text-center text-dark">Use your registered YubiKey or security key.</p>
+            <form id="yubikey-authentication-form" class="mt-4">
+              {% csrf_token %}
+              <div id="yubikey-authentication-status" class="alert d-none"
+                   role="status" aria-live="polite"></div>
+              <button id="yubikey-authentication-button" type="submit"
+                      class="btn btn-primary mb-2 w-100">Use security key</button>
+            </form>
+          {% endif %}
 
-                        <form method="post" class="mt-4">
-                            {% csrf_token %}
-
-                            {% if messages %}
-                                {% for message in messages %}
-                                    <div class="alert alert-{{ message.tags }}">{{ message }}</div>
-                                {% endfor %}
-                            {% endif %}
-
-                            <div class="form-group">
-                                <label for="otp">Authentication Code</label>
-                                <input type="text" name="otp" class="form-control" required placeholder="e.g. 123456">
-                            </div>
-
-                            <div class="sign-info">
-                                <button type="submit" class="btn btn-primary mb-2 w-100">Verify</button>
-                            </div>
-                        </form>
-                    </div>
-                </div>
-            </div>
-
-            <div class="overlay-container">
-                <div class="overlay">
-                    <div class="overlay-panel overlay-left">
-                        <a class="sign-in-logo mb-5" href="#">
-                            <img src="{% static 'dashboard/images/logo.png' %}" class="img-fluid" alt="logo">
-                        </a>
-                        <p>To keep connected with us please login with your personal info</p>
-                        <button class="btn iq-border-primary mt-2" id="signIn">Sign In</button>
-                    </div>
-                    <div class="overlay-panel overlay-right">
-                        <a class="sign-in-logo mb-5" href="#">
-                            <img src="{% static 'dashboard/images/logo.png' %}" class="img-fluid" alt="logo">
-                        </a>
-                        <h3 style="color: #00d0ff">Owasp WafControl</h3>
-                        <br>
-                        <h>This project utilizes OWASP Core Rule Set — special thanks to the CRS maintainers</h>
-
-                    </div>
-                </div>
-            </div>
-
+          {% if totp_enabled %}
+            {% if yubikey_enabled %}<hr><p class="text-center text-muted">Or use your authenticator app</p>{% endif %}
+            <form method="post" class="mt-4">
+              {% csrf_token %}
+              <div class="form-group">
+                <label for="otp">Authentication code</label>
+                <input id="otp" type="text" name="otp" class="form-control" required
+                       inputmode="numeric" autocomplete="one-time-code"
+                       placeholder="For example: 123456">
+              </div>
+              <button type="submit" class="btn btn-secondary mb-2 w-100">Verify code</button>
+            </form>
+          {% endif %}
         </div>
-    </section>
-{% endblock %}
+      </div>
+    </div>
+    <div class="overlay-container">
+      <div class="overlay">
+        <div class="overlay-panel overlay-left">
+          <a class="sign-in-logo mb-5" href="#"><img src="{% static 'dashboard/images/logo.png' %}"
+             class="img-fluid" alt="OWASP WAFControl"></a>
+        </div>
+        <div class="overlay-panel overlay-right">
+          <a class="sign-in-logo mb-5" href="#"><img src="{% static 'dashboard/images/logo.png' %}"
+             class="img-fluid" alt="OWASP WAFControl"></a>
+          <h3 style="color: #00d0ff">OWASP WAFControl</h3>
+          <p>Protected administrative access</p>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+{% if yubikey_enabled %}
+<script>
+document.addEventListener("DOMContentLoaded", function () {
+  const form = document.getElementById("yubikey-authentication-form");
+  const button = document.getElementById("yubikey-authentication-button");
+  const status = document.getElementById("yubikey-authentication-status");
+  const csrfToken = form.querySelector('input[name="csrfmiddlewaretoken"]').value;
 
-{% block js %}
+  function showStatus(message, kind) {
+    status.textContent = message;
+    status.className = "alert alert-" + kind;
+  }
+  function decodeBase64Url(value) {
+    const base64 = value.replace(/-/g, "+").replace(/_/g, "/");
+    const padded = base64 + "=".repeat((4 - base64.length % 4) % 4);
+    return Uint8Array.from(atob(padded), character => character.charCodeAt(0));
+  }
+  function encodeBase64Url(value) {
+    if (value === null) return null;
+    let binary = "";
+    new Uint8Array(value).forEach(byte => binary += String.fromCharCode(byte));
+    return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+  }
+  function decodeRequestOptions(options) {
+    options.challenge = decodeBase64Url(options.challenge);
+    (options.allowCredentials || []).forEach(item => item.id = decodeBase64Url(item.id));
+    return options;
+  }
+  function serializeAssertion(credential) {
+    return {
+      id: credential.id,
+      rawId: encodeBase64Url(credential.rawId),
+      type: credential.type,
+      authenticatorAttachment: credential.authenticatorAttachment,
+      clientExtensionResults: credential.getClientExtensionResults(),
+      response: {
+        authenticatorData: encodeBase64Url(credential.response.authenticatorData),
+        clientDataJSON: encodeBase64Url(credential.response.clientDataJSON),
+        signature: encodeBase64Url(credential.response.signature),
+        userHandle: encodeBase64Url(credential.response.userHandle)
+      }
+    };
+  }
+  async function request(url, body) {
+    const response = await fetch(url, {
+      method: "POST", credentials: "same-origin",
+      headers: {"Content-Type": "application/json", "X-CSRFToken": csrfToken},
+      body: JSON.stringify(body)
+    });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || "Security key verification failed.");
+    return data;
+  }
+
+  form.addEventListener("submit", async event => {
+    event.preventDefault();
+    button.disabled = true;
+    showStatus("Waiting for your security key…", "info");
+    try {
+      if (!window.PublicKeyCredential || !navigator.credentials) {
+        throw new Error("This browser does not support WebAuthn.");
+      }
+      const options = await request(
+        "{% url 'wafinstaller:yubikey_authentication_options' %}", {}
+      );
+      const credential = await navigator.credentials.get({
+        publicKey: decodeRequestOptions(options.publicKey)
+      });
+      const result = await request(
+        "{% url 'wafinstaller:yubikey_authentication_complete' %}",
+        serializeAssertion(credential)
+      );
+      window.location.href = result.redirect || "/dashboard/";
+    } catch (error) {
+      showStatus(error.message || "Security key verification failed.", "danger");
+      button.disabled = false;
+    }
+  });
+});
+</script>
+{% endif %}
 {% endblock %}

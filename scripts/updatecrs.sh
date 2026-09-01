@@ -3,7 +3,7 @@
 # Update to the latest CRS release (idempotent)
 # - Detects nginx/apache automatically
 # - Skips download if the latest version directory already exists
-# - Always points main.conf to the latest version and reloads the server
+# - Makes no configuration change and performs no reload when already current
 
 set -euo pipefail
 export PATH="/usr/sbin:/usr/bin:/sbin:/bin:/usr/local/bin:$PATH"
@@ -17,9 +17,13 @@ detect_server() {
 }
 
 latest_tag() {
-  # returns e.g. v4.18.0
-  curl -fsSL "https://api.github.com/repos/coreruleset/coreruleset/releases/latest" \
-    | grep -oP '"tag_name":\s*"\K[^"]+'
+  # Select the highest stable semantic release, not the most recently published tag.
+  curl -fsSL "https://api.github.com/repos/coreruleset/coreruleset/releases?per_page=100" \
+    | sed -n 's/.*"tag_name":[[:space:]]*"v\([0-9][0-9.]*\)".*/\1/p' \
+    | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' \
+    | sort -V \
+    | tail -n1 \
+    | sed 's/^/v/'
 }
 
 SERVER="$(detect_server)"
@@ -60,11 +64,34 @@ TARGET_DIR="$CRS_PARENT_DIR/coreruleset-${NUM_VER}"
 CRS_RULE_DIR="$TARGET_DIR/rules"
 TMP_DIR="/tmp/crs_update.$$"
 
+active_version() {
+  local version=""
+  if [[ "$SERVER" == "nginx" && -f "$MAIN_CONF" ]]; then
+    version="$(grep -Eo 'coreruleset-[0-9]+\.[0-9]+(\.[0-9]+)?' "$MAIN_CONF" | head -n1 | sed 's/coreruleset-//' || true)"
+  elif [[ "$SERVER" == "apache" ]]; then
+    if [[ -L "/etc/modsecurity/crs/current" ]]; then
+      version="$(readlink -f /etc/modsecurity/crs/current | grep -Eo 'coreruleset-[0-9]+\.[0-9]+(\.[0-9]+)?' | head -n1 | sed 's/coreruleset-//' || true)"
+    elif [[ -f "$MAIN_CONF" ]]; then
+      version="$(grep -Eo 'coreruleset-[0-9]+\.[0-9]+(\.[0-9]+)?' "$MAIN_CONF" | head -n1 | sed 's/coreruleset-//' || true)"
+    fi
+  fi
+  printf '%s' "$version"
+}
+
+ACTIVE_VERSION="$(active_version)"
+if [[ "$ACTIVE_VERSION" == "$NUM_VER" ]]; then
+  echo "[=] CRS $NUM_VER is already active. No configuration change and no reload required."
+  exit 0
+fi
+
 mkdir -p "$CRS_PARENT_DIR"
 
 # Install only if not present
-if [[ -d "$TARGET_DIR" ]]; then
+if [[ -d "$TARGET_DIR/rules" ]]; then
   echo "[=] CRS $TAG already present at $TARGET_DIR. Skipping download."
+elif [[ -e "$TARGET_DIR" ]]; then
+  echo "[✗] CRS target exists but is incomplete: $TARGET_DIR"
+  exit 1
 else
   echo "[+] Downloading CRS $TAG ..."
   mkdir -p "$TMP_DIR"
@@ -116,31 +143,60 @@ EOR
   fi
 fi
 
-# Rewrite main.conf to point to THIS version
+# Rewrite main.conf to point to THIS version, keeping a rollback copy.
 echo "[+] Updating $MAIN_CONF"
 mkdir -p "$(dirname "$MAIN_CONF")"
-touch "$MAIN_CONF"
-sed -i '/Include .*crs-setup.conf/d' "$MAIN_CONF" || true
-sed -i '/Include .*rules\/\*.conf/d' "$MAIN_CONF" || true
-{
-  echo "Include $TARGET_DIR/crs-setup.conf"
-  echo "Include $TARGET_DIR/rules/*.conf"
-} >> "$MAIN_CONF"
+CONF_BACKUP="$(mktemp /tmp/wafcontrol-main-conf.XXXXXX)"
+CONF_CANDIDATE="$(mktemp /tmp/wafcontrol-main-conf-candidate.XXXXXX)"
+MAIN_CONF_EXISTED=0
+if [[ -f "$MAIN_CONF" ]]; then
+  cp -a "$MAIN_CONF" "$CONF_BACKUP"
+  MAIN_CONF_EXISTED=1
+fi
+if [[ "$SERVER" == "nginx" ]]; then
+  WAFCONTROL_POLICY_DIR="${WAFCONTROL_POLICY_DIR:-/etc/nginx/modsec/wafcontrol}" \
+    "$(dirname "$0")/render_nginx_crs_main.sh" \
+    "$MAIN_CONF" "$TARGET_DIR" "$CONF_CANDIDATE"
+else
+  if [[ -f "$MAIN_CONF" ]]; then
+    sed '/Include .*crs-setup.conf/d; /Include .*rules\/\*.conf/d' "$MAIN_CONF" > "$CONF_CANDIDATE"
+  else
+    : > "$CONF_CANDIDATE"
+  fi
+  printf 'Include %s/crs-setup.conf\nInclude %s/rules/*.conf\n' \
+    "$TARGET_DIR" "$TARGET_DIR" >> "$CONF_CANDIDATE"
+fi
+cp "$CONF_CANDIDATE" "$MAIN_CONF"
+
+rollback_main_conf() {
+  if [[ "$MAIN_CONF_EXISTED" -eq 1 ]]; then
+    cp -a "$CONF_BACKUP" "$MAIN_CONF"
+  else
+    rm -f "$MAIN_CONF"
+  fi
+}
 
 # Test & reload
 echo "[+] Testing web server configuration..."
 if ! "${TEST_CMD[@]}" >/dev/null 2>&1; then
-  echo "[✗] Config test failed:"
-  "${TEST_CMD[@]}"
+  echo "[✗] Config test failed; restoring the previous configuration."
+  rollback_main_conf
+  "${TEST_CMD[@]}" || true
+  rm -f "$CONF_BACKUP" "$CONF_CANDIDATE"
   exit 1
 fi
-
 echo "[+] Reloading $SERVER..."
 if "${RELOAD_CMD[@]}" >/dev/null 2>&1; then
   echo "[✓] Updated to $TAG and $SERVER reloaded."
 else
-  echo "[!] Updated to $TAG but reload failed. Check server logs."
+  echo "[✗] Reload failed; restoring and reloading the previous configuration."
+  rollback_main_conf
+  "${TEST_CMD[@]}" || true
+  "${RELOAD_CMD[@]}" >/dev/null 2>&1 || true
+  rm -f "$CONF_BACKUP" "$CONF_CANDIDATE"
+  exit 1
 fi
+rm -f "$CONF_BACKUP" "$CONF_CANDIDATE"
 
 # Cleanup if we downloaded
 [[ -d "$TMP_DIR" ]] && rm -rf "$TMP_DIR"

@@ -2,6 +2,12 @@
 
 # OWASP WAFControl
 
+> [!NOTE]
+> This fork contains a proposed community evolution plan for safer policy
+> management, CRS exclusions, address lists, application policies, multi-node
+> operation, and security-platform integrations. It is not yet the official
+> OWASP WAFControl roadmap. See [WAFControl Evolution Roadmap](ROADMAP.md).
+
 The **OWASP WAFControl** project provides a web-based dashboard and management interface for ModSecurity and the OWASP Core Rule Set (CRS).  
 It simplifies installation, configuration, and operation of CRS and ModSecurity, enabling administrators and security engineers to deploy, monitor, and manage WAF rules more effectively.
 
@@ -34,9 +40,138 @@ chmod +x install.sh
 sudo ./install.sh
 ```
 
+### Database migrations
 
+Migration source files are versioned in the repository. On a new installation,
+apply them with:
+
+```bash
+python manage.py migrate
+```
+
+Older WAFControl installations created application tables through Django's
+`--run-syncdb` fallback and do not have a migration history for `wafinstaller`.
+Back up PostgreSQL, then adopt the initial migration and create newer tables
+with:
+
+```bash
+python manage.py migrate --fake-initial
+python manage.py showmigrations wafinstaller
+```
+
+Do not use `--fake` for later migrations. Review the migration plan and keep a
+database backup before every upgrade.
+
+### Managed exclusions and address lists
+
+The **Managed Policies** page stores exclusions and named address lists in the
+database, renders dedicated files before and after CRS, shows a deployment diff,
+and requires explicit approval before a rule exclusion becomes active.
+
+The semantics are deliberately distinct:
+
+- **Trusted** remains inspected by the WAF and is reserved for future
+  Fail2ban/CrowdSec allow-list export;
+- **WAF bypass** disables inspection and produces a prominent warning;
+- **Block** returns HTTP 403;
+- **Observe** logs the matching source without blocking it.
+
+On an Nginx installation, wire the managed files into ModSecurity once:
+
+~~~bash
+sudo WAFCONTROL_SERVICE_USER=wafcontrol ./scripts/install_managed_policy.sh /etc/nginx/modsec/wafcontrol
+~~~
+
+The installer places the before-file immediately before the active CRS rules
+include and the after-file immediately after it. It runs nginx -t, reloads
+Nginx, and restores the previous main.conf if validation or reload fails.
+
+Set the same directory in the application environment:
+
+~~~dotenv
+WAFCONTROL_POLICY_DIR=/etc/nginx/modsec/wafcontrol
+~~~
+
+The application service account needs write access only to this managed
+directory. It does not need write access to OWASP CRS source files.
+
+### Event triage and frozen revisions
+
+The attack view stores a reviewer classification and notes without altering the
+original WAF event. Parsed events retain the HTTP method, ModSecurity
+transaction ID, matched variable and CRS tags so a draft exclusion can default
+to the narrowest known target.
+
+Managed policy deployment follows a freeze, approve, deploy workflow. Frozen
+contents and their summary are checksum-verified and immutable. Set
+`WAFCONTROL_REQUIRE_SEPARATE_APPROVER=True` to prevent the author from
+approving their own exclusion or revision.
+
+Celery checks expiry every hour. When an active object expires, WAFControl
+regenerates the policy, validates the live Nginx/ModSecurity configuration and
+reloads it. A failed validation restores the database state. The dashboard also
+shows objects and owners due to expire within seven days.
+
+
+
+### Applications and reusable policies
+
+The **Managed Policies** page can register protected applications by exact
+hostname and bind each one to a reusable policy. Policies control the
+ModSecurity engine mode (Off, DetectionOnly, or On), paranoia level, and
+inbound/outbound anomaly thresholds.
+
+A policy may inherit from another policy. Blank values inherit; explicit
+per-application JSON overrides take precedence and are strictly validated.
+The dashboard always displays the resolved configuration. Only enabled
+applications, policies, and bindings are rendered into the before-CRS file.
+
+Saving a policy candidate also freezes a canonical ConfigRevision snapshot.
+Its checksum and link to the immutable rendered PolicyRevision make the
+application-to-policy state auditable alongside the exact ModSecurity content.
+
+### Static asset collection
+
+Dashboard sources live in `frontend/static`; collected files are written to
+`staticfiles`. These directories must remain distinct. Nginx should serve
+`/static/` from `/opt/WafControl/staticfiles/`. It is safe to run
+`python manage.py collectstatic --clear --noinput` only with this layout.
+
+
+
+
+## Production deployment
+
+WAFControl also supports YubiKey and cross-platform FIDO2/WebAuthn security keys. See the [YubiKey operations guide](docs/operations/WEBAUTHN_YUBIKEY.md) for configuration, enrolment and recovery.
+
+For a ready-to-copy French prompt that hands a new-site deployment to another agent, use [DEPLOYMENT_AGENT_PROMPT_FR.md](docs/operations/DEPLOYMENT_AGENT_PROMPT_FR.md).
+
+For a reproducible Nginx, ModSecurity, CRS, PostgreSQL, Celery and MapAttack deployment, use the standalone [deployment runbook](docs/operations/DEPLOYMENT.md). Operators and automation agents should also follow the [agent handoff checklist](docs/operations/AGENT_HANDOFF.md). The [sanitised Ironitia inventory](docs/operations/PRODUCTION_INVENTORY_IRONITIA.md) records the validated Nginx topology. The [ISPConfig inventory](docs/operations/PRODUCTION_INVENTORY_ISPCONFIG248.md) records the Apache deployment, alert migration and rollback controls.
+
+
+Render a site-specific, secret-free configuration bundle with `scripts/render_deployment_config.sh`; do not copy Ironitia addresses or exclusions to another site.
 
 ## WAFControl Features
+
+
+### Real-time Syslog security events
+
+Every newly persisted ModSecurity alert is emitted immediately to the dedicated
+`/run/wafcontrol-rsyslog/syslog.sock` Unix socket with ident `wafcontrol` and
+facility `local5`. Rsyslog applies flow control locally, disables repeated
+message reduction for this action, and forwards over queued RFC3164/TCP. The
+message body is intentionally compatible with the common Snort alert shape:
+
+~~~text
+[1:942100:1] MODSEC SQL Injection Attack Detected [Classification: Web Application SQL Injection] [Priority: 1] {TCP} 34.34.254.214:4575 -> 46.28.168.244:443
+~~~
+
+Source and destination addresses and ports are extracted from ModSecurity audit
+section A and stored with the alert. Re-reading a transaction does not emit it
+again, while an identical signature in a new transaction remains a new event.
+The collection jobs run every ten seconds.
+
+The generic template `deploy/rsyslog-wafcontrol-mapattack.conf.template` forwards only this program over RFC3164/TCP using a disk-assisted queue. Render it with `scripts/render_deployment_config.sh`, install the result in `/etc/rsyslog.d/60-wafcontrol-mapattack.conf`, validate with `rsyslogd -N1`, and restart rsyslog.
 
 - **Attack Control**:  
   - Real-time logging of attacks with detailed insights. 

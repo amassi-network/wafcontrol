@@ -14,6 +14,7 @@ VER_RE   = re.compile(r'\[ver "([^"]+)"\]')
 REFERER_RE = re.compile(r'REQUEST_HEADERS:Referer:\s*([^\]\n]+)')
 TAGS_RE  = re.compile(r'\[tag "([^"]+)"\]')
 REQ_LINE_RE = re.compile(r'^(GET|POST|HEAD|PUT|DELETE|OPTIONS|PATCH)\s+(\S+)', re.I)
+MATCHED_VAR_RE = re.compile(r"found within ([A-Z][A-Z0-9_]*(?::[A-Za-z0-9_.-]+)?)", re.I)
 H_LINE_RE = re.compile(r'^ModSecurity:.*$', re.M)
 
 ERR_UID_IP_PATTERNS = [
@@ -21,6 +22,7 @@ ERR_UID_IP_PATTERNS = [
     re.compile(r'\bunique_id[" ]+([^"\s]+).*?\bclient(?:\s+IP)?:\s*(\d{1,3}(?:\.\d{1,3}){3})', re.I),
 ]
 IP_FALLBACKS = [
+    re.compile(r'\[client\s+(\d{1,3}(?:\.\d{1,3}){3})(?::\d+)?\]', re.I),
     re.compile(r'Client IP:\s*([0-9]{1,3}(?:\.[0-9]{1,3}){3})', re.I),
     re.compile(r'"client_ip"\s*:\s*"([0-9]{1,3}(?:\.[0-9]{1,3}){3})"', re.I),
     re.compile(r'"src_ip"\s*:\s*"([0-9]{1,3}(?:\.[0-9]{1,3}){3})"', re.I),
@@ -31,7 +33,8 @@ STATIC_EXT_RE = re.compile(r'\.(?:js|css|png|jpg|jpeg|gif|ico|svg|webp|woff2?|tt
 STATIC_PATH_HINTS = ("/static/", "/assets/", "/media/", "/favicon.ico")
 
 IMPORTANT_FAMILIES = ("942","930","932","941","931","933")
-SUPPRESS_FAMILIES = ("920","949")
+SUPPRESS_FAMILIES = ("949","959","980")
+SUPPRESS_MESSAGES = ("WAFControl_deployment_probe",)
 IMPORTANT_KEYWORDS = ["sql","xss","rce","command injection","os command","traversal","lfi","rfi","injection","path traversal","php injection","remote code","eval","system(","cmd=","base64_decode"]
 
 ACCESS_LINE_RE = re.compile(r'^(?P<ip>\d{1,3}(?:\.\d{1,3}){3})\s+\S+\s+\S+\s+\[(?P<ts>[^\]]+)\]\s+"(?P<m>\S+)\s+(?P<target>\S+)\s+(?P<p>\S+)"\s+(?P<status>\d{3})\s+(?P<size>\S+)')
@@ -158,6 +161,14 @@ def uri_from_B_sections(sections: Dict[str, List[str]]) -> Optional[str]:
         m = REQ_LINE_RE.match(ln.strip())
         if m: return m.group(2)
     return None
+
+def method_from_B_sections(sections: Dict[str, List[str]]) -> str:
+    for line in sections.get("B", []):
+        match = REQ_LINE_RE.match(line.strip())
+        if match:
+            return match.group(1).upper()
+    return ""
+
 
 
 def important_enough(msg: str, tags: List[str], blocked: bool, include_protocol_anomalies: bool) -> bool:
@@ -326,8 +337,7 @@ def filter_rule_hits(hits: List[Tuple[str, str]]) -> List[Tuple[str, str]]:
 
         if family in SUPPRESS_FAMILIES:
             continue
-
-        if family not in IMPORTANT_FAMILIES:
+        if msg in SUPPRESS_MESSAGES:
             continue
 
         filtered_hits.append((rid, msg))
@@ -357,7 +367,7 @@ def pick_best_target(ip: str, base_uri: str, candidates: List[str]) -> Optional[
         if base_uri and t.startswith(base_uri): return t
     for t in reversed(candidates):
         if base_uri and base_uri in t: return t
-    return candidates[-1]
+    return None
 
 def _read(path: str) -> List[str]:
     try:
@@ -464,25 +474,15 @@ def blocks_from_errorlogs(paths: List[str], tail_n: int = 12000) -> List[str]:
         group = {}
         for ln in lines:
             if "ModSecurity:" not in ln: continue
-            m = ERROR_H_LINE.search(ln)
-            if not m: continue
-            rid = m.group(1) or ""
-            msg = m.group(3) or ""
-            uri = m.group(5) or ""
-            uid = m.group(7) or hashlib.sha1(ln.encode()).hexdigest()[:10]
-            key = uid
-            group.setdefault(key, []).append((rid, msg, uri, uid, ln))
+            rid = extract_first(RID_RE, ln)
+            if not rid: continue
+            uid = extract_first(UID_RE, ln) or hashlib.sha1(ln.encode()).hexdigest()[:10]
+            group.setdefault(uid, []).append(ln)
         for uid, items in group.items():
-            rid = hashlib.sha1(uid.encode()).hexdigest()[:8]
-            lines_out = [f"---{rid}---H--"]
-            uri = ""
-            for r, mmsg, u, u2, raw in items:
-                uri = uri or u
-                if uri:
-                    lines_out.append('ModSecurity: Warning. [id "%s"] [msg "%s"] [uri "%s"] [unique_id "%s"]' % (r, mmsg, uri, uid))
-                else:
-                    lines_out.append('ModSecurity: Warning. [id "%s"] [msg "%s"] [unique_id "%s"]' % (r, mmsg, uid))
-            lines_out.append(f"---{rid}---Z--")
+            marker = hashlib.sha1(uid.encode()).hexdigest()[:8]
+            lines_out = [f"---{marker}---H--"]
+            lines_out.extend(items)
+            lines_out.append(f"---{marker}---Z--")
             out.append("\n".join(lines_out))
     return out
 

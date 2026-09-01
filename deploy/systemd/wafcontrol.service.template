@@ -1,0 +1,22 @@
+[Unit]
+Description=OWASP WAFControl Gunicorn
+After=network-online.target postgresql.service redis-server.service
+Wants=network-online.target
+
+[Service]
+User=@@SERVICE_USER@@
+Group=@@SERVICE_GROUP@@
+WorkingDirectory=@@APP_ROOT@@
+Environment=DJANGO_SETTINGS_MODULE=WafControl.settings
+RuntimeDirectory=wafcontrol
+RuntimeDirectoryMode=0750
+UMask=0007
+ExecStart=@@APP_ROOT@@/venv/bin/gunicorn --workers 3 --timeout 120 --bind unix:/run/wafcontrol/gunicorn.sock WafControl.wsgi:application
+Restart=on-failure
+RestartSec=3
+PrivateTmp=true
+NoNewPrivileges=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+[Install]
+WantedBy=multi-user.target

@@ -9,10 +9,10 @@ https://docs.djangoproject.com/en/5.2/topics/settings/
 For the full list of settings and their values, see
 https://docs.djangoproject.com/en/5.2/ref/settings/
 """
+
 import os
 from pathlib import Path
-import bcrypt
-from celery.schedules import crontab
+
 import environ
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
@@ -27,77 +27,76 @@ env = environ.Env(
     X_FRAME_OPTIONS=(str, "DENY"),
 )
 
-environ.Env.read_env(BASE_DIR / '.env')
+environ.Env.read_env(BASE_DIR / ".env")
 
 # Quick-start development settings - unsuitable for production
 # See https://docs.djangoproject.com/en/5.2/howto/deployment/checklist/
 
 # SECURITY WARNING: keep the secret key used in production secret!
-SECRET_KEY = env('SECRET_KEY')
+SECRET_KEY = env("SECRET_KEY")
 
 # SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = env.bool('DEBUG', False)
+DEBUG = env.bool("DEBUG", False)
 
-ALLOWED_HOSTS = env.list('ALLOWED_HOSTS', default=['127.0.0.1', 'localhost'])
-CSRF_TRUSTED_ORIGINS = env.list('CSRF_TRUSTED_ORIGINS', default=[])
+ALLOWED_HOSTS = env.list("ALLOWED_HOSTS", default=["127.0.0.1", "localhost"])
+CSRF_TRUSTED_ORIGINS = env.list("CSRF_TRUSTED_ORIGINS", default=[])
 
 # Application definition
 
 INSTALLED_APPS = [
-    'django.contrib.admin',
-    'django.contrib.auth',
-    'django.contrib.contenttypes',
-    'django.contrib.sessions',
-    'django.contrib.messages',
-    'django.contrib.staticfiles',
-
+    "django.contrib.admin",
+    "django.contrib.auth",
+    "django.contrib.contenttypes",
+    "django.contrib.sessions",
+    "django.contrib.messages",
+    "django.contrib.staticfiles",
     # My apps
-    'wafinstaller',
-
+    "wafinstaller",
 ]
 
 MIDDLEWARE = [
-    'django.middleware.security.SecurityMiddleware',
-    'django.contrib.sessions.middleware.SessionMiddleware',
-    'django.middleware.common.CommonMiddleware',
-    'django.middleware.csrf.CsrfViewMiddleware',
-    'django.contrib.auth.middleware.AuthenticationMiddleware',
-    'django.contrib.messages.middleware.MessageMiddleware',
-    'django.middleware.clickjacking.XFrameOptionsMiddleware',
+    "django.middleware.security.SecurityMiddleware",
+    "django.contrib.sessions.middleware.SessionMiddleware",
+    "django.middleware.common.CommonMiddleware",
+    "django.middleware.csrf.CsrfViewMiddleware",
+    "django.contrib.auth.middleware.AuthenticationMiddleware",
+    "django.contrib.messages.middleware.MessageMiddleware",
+    "django.middleware.clickjacking.XFrameOptionsMiddleware",
 ]
 
-ROOT_URLCONF = 'WafControl.urls'
+ROOT_URLCONF = "WafControl.urls"
 
 TEMPLATES = [
     {
-        'BACKEND': 'django.template.backends.django.DjangoTemplates',
-        'DIRS': [BASE_DIR / 'templates']
-        ,
-        'APP_DIRS': True,
-        'OPTIONS': {
-            'context_processors': [
-                'django.template.context_processors.request',
-                'django.contrib.auth.context_processors.auth',
-                'django.contrib.messages.context_processors.messages',
+        "BACKEND": "django.template.backends.django.DjangoTemplates",
+        "DIRS": [BASE_DIR / "templates"],
+        "APP_DIRS": True,
+        "OPTIONS": {
+            "context_processors": [
+                "django.template.context_processors.request",
+                "django.contrib.auth.context_processors.auth",
+                "django.contrib.messages.context_processors.messages",
             ],
         },
     },
 ]
 
-WSGI_APPLICATION = 'WafControl.wsgi.application'
+WSGI_APPLICATION = "WafControl.wsgi.application"
 
 
 # Database
 # https://docs.djangoproject.com/en/5.2/ref/settings/#databases
 
 DATABASES = {
-    'default': {
-        'ENGINE': env('DB_ENGINE', default='django.db.backends.postgresql'),  # or 'django.db.backends.postgresql_psycopg2'
-        'NAME': env('DB_NAME'),
-        'USER': env('DB_USER'),
-        'PASSWORD': env('DB_PASS'),
-        'HOST': env('DB_HOST', default='127.0.0.1'),
-        'PORT': env('DB_PORT', default='5432'),
+    "default": {
+        "ENGINE": env(
+            "DB_ENGINE", default="django.db.backends.postgresql"
+        ),  # or 'django.db.backends.postgresql_psycopg2'
+        "NAME": env("DB_NAME"),
+        "USER": env("DB_USER"),
+        "PASSWORD": env("DB_PASS"),
+        "HOST": env("DB_HOST", default="127.0.0.1"),
+        "PORT": env("DB_PORT", default="5432"),
     }
 }
 
@@ -106,16 +105,16 @@ DATABASES = {
 
 AUTH_PASSWORD_VALIDATORS = [
     {
-        'NAME': 'django.contrib.auth.password_validation.UserAttributeSimilarityValidator',
+        "NAME": "django.contrib.auth.password_validation.UserAttributeSimilarityValidator",
     },
     {
-        'NAME': 'django.contrib.auth.password_validation.MinimumLengthValidator',
+        "NAME": "django.contrib.auth.password_validation.MinimumLengthValidator",
     },
     {
-        'NAME': 'django.contrib.auth.password_validation.CommonPasswordValidator',
+        "NAME": "django.contrib.auth.password_validation.CommonPasswordValidator",
     },
     {
-        'NAME': 'django.contrib.auth.password_validation.NumericPasswordValidator',
+        "NAME": "django.contrib.auth.password_validation.NumericPasswordValidator",
     },
 ]
 
@@ -130,9 +129,9 @@ PASSWORD_HASHERS = [
 # Internationalization
 # https://docs.djangoproject.com/en/5.2/topics/i18n/
 
-LANGUAGE_CODE = 'en-us'
+LANGUAGE_CODE = "en-us"
 
-TIME_ZONE = 'UTC'
+TIME_ZONE = "UTC"
 
 USE_I18N = True
 
@@ -143,27 +142,27 @@ USE_TZ = True
 # https://docs.djangoproject.com/en/5.2/howto/static-files/
 
 STATICFILES_DIRS = [
-    BASE_DIR / "frontend",
+    BASE_DIR / "frontend" / "static",
 ]
 
 # js, css, img files
-STATIC_URL = '/static/'
-STATIC_ROOT = "frontend/static"
+STATIC_URL = "/static/"
+STATIC_ROOT = BASE_DIR / "staticfiles"
 
 # User uploaded files
-MEDIA_URL = '/media/'
+MEDIA_URL = "/media/"
 MEDIA_ROOT = "StaticsFiles/media"
 
 # Default primary key field type
 # https://docs.djangoproject.com/en/5.2/ref/settings/#default-auto-field
 
-DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
+DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
 
-CELERY_BROKER_URL = 'redis://localhost:6379/0'
-CELERY_RESULT_BACKEND = 'redis://localhost:6379/0'
-CELERY_ACCEPT_CONTENT = ['json']
-CELERY_TASK_SERIALIZER = 'json'
+CELERY_BROKER_URL = "redis://localhost:6379/0"
+CELERY_RESULT_BACKEND = "redis://localhost:6379/0"
+CELERY_ACCEPT_CONTENT = ["json"]
+CELERY_TASK_SERIALIZER = "json"
 broker_connection_retry_on_startup = True
 CELERYD_TASK_TIME_LIMIT = 300
 CELERYD_TASK_SOFT_TIME_LIMIT = 250
@@ -175,13 +174,52 @@ SESSION_COOKIE_SECURE = env.bool("SESSION_COOKIE_SECURE", default=True)
 SECURE_BROWSER_XSS_FILTER = env.bool("SECURE_BROWSER_XSS_FILTER", default=True)
 SECURE_CONTENT_TYPE_NOSNIFF = env.bool("SECURE_CONTENT_TYPE_NOSNIFF", default=True)
 X_FRAME_OPTIONS = env("X_FRAME_OPTIONS", default="DENY")
+SECURE_SSL_REDIRECT = env.bool("SECURE_SSL_REDIRECT", default=False)
+SECURE_HSTS_SECONDS = env.int("SECURE_HSTS_SECONDS", default=0)
+SECURE_HSTS_INCLUDE_SUBDOMAINS = env.bool("SECURE_HSTS_INCLUDE_SUBDOMAINS", default=False)
+SECURE_HSTS_PRELOAD = env.bool("SECURE_HSTS_PRELOAD", default=False)
 
 # Login settings
-LOGIN_URL = 'login'
-LOGIN_REDIRECT_URL = 'dashboard'
-LOGOUT_REDIRECT_URL = 'login'
+LOGIN_URL = "login"
+LOGIN_REDIRECT_URL = "dashboard"
+LOGOUT_REDIRECT_URL = "login"
 
-WAF_PANEL_HOSTS = [x.strip() for x in os.getenv("WAF_PANEL_HOSTS", ",".join(ALLOWED_HOSTS)).split(",") if x.strip()]
-WAF_PANEL_PATH_PREFIXES = [x.strip() for x in os.getenv("WAF_PANEL_PATH_PREFIXES", "/dashboard/,/admin/,/verify-2fa/").split(",") if x.strip()]
-WAF_IGNORE_PRIVATE_IPS = os.getenv("WAF_IGNORE_PRIVATE_IPS", "true").lower() in ("1","true","yes","on")
-WAF_TRUSTED_CLIENT_CIDRS = [x.strip() for x in os.getenv("WAF_TRUSTED_CLIENT_CIDRS", "10.0.0.0/8,172.16.0.0/12,192.168.0.0/16").split(",") if x.strip()]
+WAF_PANEL_HOSTS = [
+    x.strip()
+    for x in os.getenv("WAF_PANEL_HOSTS", ",".join(ALLOWED_HOSTS)).split(",")
+    if x.strip()
+]
+WAF_PANEL_PATH_PREFIXES = [
+    x.strip()
+    for x in os.getenv(
+        "WAF_PANEL_PATH_PREFIXES", "/dashboard/,/admin/,/verify-2fa/"
+    ).split(",")
+    if x.strip()
+]
+WAF_IGNORE_PRIVATE_IPS = os.getenv("WAF_IGNORE_PRIVATE_IPS", "true").lower() in (
+    "1",
+    "true",
+    "yes",
+    "on",
+)
+WAF_TRUSTED_CLIENT_CIDRS = [
+    x.strip()
+    for x in os.getenv(
+        "WAF_TRUSTED_CLIENT_CIDRS", "10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"
+    ).split(",")
+    if x.strip()
+]
+WAFCONTROL_POLICY_DIR = env(
+    "WAFCONTROL_POLICY_DIR", default="/etc/nginx/modsec/wafcontrol"
+)
+WEBAUTHN_RP_ID = env("WEBAUTHN_RP_ID", default="")
+WEBAUTHN_RP_NAME = env("WEBAUTHN_RP_NAME", default="OWASP WAFControl")
+WEBAUTHN_ALLOWED_ORIGINS = env.list("WEBAUTHN_ALLOWED_ORIGINS", default=[])
+WEBAUTHN_CHALLENGE_TTL_SECONDS = env.int(
+    "WEBAUTHN_CHALLENGE_TTL_SECONDS", default=300
+)
+
+WAFCONTROL_REQUIRE_SEPARATE_APPROVER = env.bool(
+    "WAFCONTROL_REQUIRE_SEPARATE_APPROVER", default=False
+)
+SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
